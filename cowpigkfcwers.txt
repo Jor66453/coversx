@@ -1,0 +1,3727 @@
+local gg = (typeof(getgenv) == "function") and getgenv() or _G
+if gg.__coverhub_unload then pcall(gg.__coverhub_unload) end
+local DEBUG = false
+local function rand_gui_name()
+	local a = string.char(math.random(65, 90))
+	local b = {}
+	for i = 1, math.random(10, 14) do
+		b[i] = string.char(math.random(97, 122))
+	end
+	return a .. table.concat(b)
+end
+local plrs = game:GetService("Players")
+local rs   = game:GetService("ReplicatedStorage")
+local rsvc = game:GetService("RunService")
+local uis  = game:GetService("UserInputService")
+local es   = game:GetService("EncodingService")
+local lp   = plrs.LocalPlayer
+local cam  = workspace.CurrentCamera
+local vLuau = require(rs:WaitForChild("vLuau"))
+local AC = rs:WaitForChild("Remotes")
+             :WaitForChild("GameServices")
+             :WaitForChild("ToClient")
+             :WaitForChild("AntiCheat")
+local KILL_REMOTES = {}
+do
+	local KILL_PATTERNS = { "AutoclickerDetected", "ReportDevice", "LogMacroKick",
+		"Detected", "ReportMacro", "LogDetect", "FlagClient", "ReportClient",
+		"BuyItemFromShop", "DebugHit", "DebugRemote" }
+	local srv = rs:WaitForChild("Remotes"):WaitForChild("GameServices"):WaitForChild("ToServer")
+	local seen = {}
+	for _, r in ipairs(srv:GetDescendants()) do
+		if (r:IsA("RemoteEvent") or r:IsA("RemoteFunction")) and not seen[r] then
+			for _, pat in ipairs(KILL_PATTERNS) do
+				if string.find(r.Name, pat, 1, true) then
+					table.insert(KILL_REMOTES, r)
+					seen[r] = true
+					break
+				end
+			end
+		end
+	end
+end
+local ac_mod = require(lp.PlayerScripts.ModuleScripts.AntiCheat)
+local clean_env = getfenv(ac_mod.init)
+local _ac_zstd       = Enum.CompressionAlgorithm.Zstd
+local _ac_decompress = es.DecompressBuffer
+local _ac_compress   = es.CompressBuffer
+local _ac_fromstr    = buffer.fromstring
+local _ac_tostr      = buffer.tostring
+local _ac_vLuau      = vLuau
+local _ac_execute    = rawget(vLuau, "luau_execute")
+local function _is_hub_key(k)
+	if type(k) ~= "string" then return false end
+	if k == "TAG"
+	   or k == "COVERHUB_KEY" or k == "COVERHUB_HWID"
+	   or k == "__cvh_shared" or k == "__cvh_hb_last"
+	   or k == "__coverhub_hub" or k == "__coverhub_unload" or k == "__coverhub_unload_signal"
+	   or k == "MLHubUnload" or k == "__MLAim" then
+		return true
+	end
+	local l = k:lower()
+	return l:find("coverhub", 1, true) ~= nil
+	    or l:find("cvh",      1, true) ~= nil
+	    or l:find("mlhub",    1, true) ~= nil
+	    or l:find("__ml",     1, true) ~= nil
+end
+local _safe_g = setmetatable({}, {
+	__index = function(_, k)
+		if _is_hub_key(k) then return nil end
+		return rawget(_G, k)
+	end,
+	__newindex = function(_, k, v) rawset(_G, k, v) end,
+	__iter = function()
+		return function(_, prev)
+			local k, v = next(_G, prev)
+			while k ~= nil do
+				if not _is_hub_key(k) then return k, v end
+				k, v = next(_G, k)
+			end
+		end, nil, nil
+	end,
+})
+local _shield_env = setmetatable({}, {
+	__index = function(_, k)
+		if k == "_G" or k == "shared" then return _safe_g end
+		if k == "getfenv" or k == "getgenv" or k == "getrenv" then return function() return _safe_g end end
+		if k == "getreg" then return function() return {} end end
+		if _is_hub_key(k) then return nil end
+		return clean_env[k]
+	end,
+	__newindex = function(_, k, v) clean_env[k] = v end,
+})
+local _ac_empty
+do
+	local ok, b = pcall(_ac_compress, es, _ac_fromstr(""), _ac_zstd, 1)
+	if ok then _ac_empty = b end
+end
+local function _ac_fallback()
+	if _ac_empty then return _ac_empty end
+	return _ac_compress(es, _ac_fromstr(""), _ac_zstd, 1)
+end
+local invocation = 0
+local function ac_handler(payload)
+	invocation += 1
+	local n = invocation
+	local ok_d, d = pcall(_ac_decompress, es, payload, _ac_zstd)
+	if not ok_d or not d then return _ac_fallback() end
+	local ok_s, raw_src = pcall(_ac_tostr, d)
+	if not ok_s or type(raw_src) ~= "string" then return _ac_fallback() end
+	if DEBUG then
+		pcall(function()
+			if not isfolder("ac_probes") then makefolder("ac_probes") end
+			writefile("ac_probes/probe_" .. tostring(n) .. ".bin", raw_src)
+		end)
+	end
+	local out = ""
+	local ok_c, loaded
+	if _ac_execute then
+		ok_c, loaded = pcall(_ac_execute, raw_src, _shield_env)
+	else
+		ok_c, loaded = pcall(_ac_vLuau, raw_src, _shield_env)
+	end
+	if ok_c and type(loaded) == "function" then
+		local ran_ok, ran_out = pcall(loaded)
+		if ran_ok and type(ran_out) == "string" then out = ran_out end
+	end
+	if DEBUG then
+		pcall(function() writefile("ac_probes/probe_" .. tostring(n) .. ".out.txt", out) end)
+	end
+	local ok_r, response = pcall(_ac_compress, es, _ac_fromstr(out), _ac_zstd, 1)
+	if not ok_r then return _ac_fallback() end
+	return response
+end
+setfenv(ac_handler, clean_env)
+AC.OnClientInvoke = ac_handler
+local ac_guard_conn
+task.spawn(function()
+	while task.wait(1) do
+		if gg.__coverhub_unload_signal then break end
+		pcall(function() AC.OnClientInvoke = ac_handler end)
+		local now_mod = rs:FindFirstChild("vLuau")
+		if now_mod then
+			local ok, new = pcall(require, now_mod)
+			if ok and new ~= _ac_vLuau then
+				_ac_vLuau   = new
+				_ac_execute = rawget(new, "luau_execute")
+			end
+		end
+	end
+end)
+do
+	local stub = setmetatable({}, { __index = function() return function() end end })
+	local kill_set = {}
+	for _, r in ipairs(KILL_REMOTES) do kill_set[r] = true end
+	local pending = {}
+	for r in pairs(kill_set) do pending[r] = true end
+	local function sweep()
+		local patched = 0
+		local seen = {}
+		for _, fn in ipairs(getgc(true)) do
+			if type(fn) == "function" then
+				local ok, ups = pcall(getupvalues, fn)
+				if ok and type(ups) == "table" then
+					for i, v in ipairs(ups) do
+						if kill_set[v] then
+							pcall(setupvalue, fn, i, stub)
+							patched += 1
+							seen[v] = true
+						end
+					end
+				end
+			end
+		end
+		for r in pairs(seen) do pending[r] = nil end
+		return patched
+	end
+	task.spawn(function()
+		task.wait(1)
+		sweep()
+		task.wait(5)
+		if next(pending) then sweep() end
+		while gg.__coverhub_hub do
+			task.wait(30)
+			sweep()
+		end
+	end)
+end
+local http = game:GetService("HttpService")
+local ActVariants = {}
+for _, c in ipairs(rs.Remotes.AbilityService.ToServer:GetChildren()) do
+	if c.Name:match("^AbilityActivated_*$") then table.insert(ActVariants, c) end
+end
+local client_debounce = require(lp.PlayerScripts.ModuleScripts.ClientDebounce)
+local ability_hdl = require(lp.PlayerScripts.ModuleScripts.AbilityHandler)
+local real_can_activate
+task.spawn(function()
+	for _ = 1, 50 do
+		local ok, ups = pcall(getupvalues, ability_hdl.start)
+		if ok and type(ups) == "table" then
+			for _, v in ipairs(ups) do
+				if type(v) == "function" then real_can_activate = v end
+			end
+			if real_can_activate then return end
+		end
+		task.wait(0.1)
+	end
+end)
+local state_replicator
+pcall(function() state_replicator = require(rs.ModuleScripts.StateReplicator) end)
+local ability_data = require(rs.ModuleScripts.Data.AbilityData)
+local tool_data = (function()
+	local ok, m = pcall(require, rs.ModuleScripts.Data.ToolData)
+	return ok and type(m) == "table" and m or {}
+end)()
+pcall(function()
+	local na = require(rs.ModuleScripts.Data.NewAbilities)
+	if type(na) == "table" then
+		for k, v in pairs(na) do
+			if ability_data[k] == nil then ability_data[k] = v end
+		end
+	end
+end)
+local target_type_enum = require(rs.ModuleScripts.Enums.TargetType)
+local ts_mod = require(rs.ModuleScripts.TargetSystem)
+local aim = {
+	Enabled = false,
+	UseAbilityRange = true,
+	IgnoreFriends = false,
+	Whitelist = {},
+	MaxDist = 500,
+	SmartAim = true,
+	Current = nil,
+	IndicatorEnabled = false,
+	IndicatorColor = Color3.fromRGB(40, 40, 181),
+}
+local friends = { at = 0, ids = {} }
+local function refresh_friends()
+	if os.clock() - friends.at < 5 then return end
+	friends.at = os.clock()
+	friends.ids = {}
+	local ok, pages = pcall(function() return plrs:GetFriendsAsync(lp.UserId) end)
+	if not ok or type(pages) ~= "userdata" and type(pages) ~= "table" then return end
+	if pages == plrs or type(pages.GetCurrentPage) ~= "function" then return end
+	for _ = 1, 30 do
+		local ok_page, entries = pcall(function() return pages:GetCurrentPage() end)
+		if not ok_page or type(entries) ~= "table" then return end
+		for _, e in ipairs(entries) do friends.ids[e.Id] = true end
+		if pages.IsFinished then break end
+		pcall(function() pages:AdvanceToNextPageAsync() end)
+	end
+end
+task.spawn(refresh_friends)
+task.spawn(function() while gg.__coverhub_hub do task.wait(45); refresh_friends() end end)
+local function is_friend(char)
+	if not aim.IgnoreFriends then return false end
+	local p = plrs:GetPlayerFromCharacter(char)
+	if not p then return false end
+	return friends.ids[p.UserId] == true
+end
+local function is_whitelisted(char)
+	if not next(aim.Whitelist) then return false end
+	local p = plrs:GetPlayerFromCharacter(char)
+	local name = ((p and p.Name) or char.Name):lower()
+	return aim.Whitelist[name] == true
+end
+local live_ability
+task.spawn(function()
+	local ok, bind = pcall(function()
+		return lp.PlayerScripts:WaitForChild("Bindables"):WaitForChild("Abilities")
+	end)
+	if not ok or not bind then return end
+	local eq = bind:FindFirstChild("AbilityEquip")
+	local un = bind:FindFirstChild("AbilityUnequip")
+	if eq then eq.Event:Connect(function(n) live_ability = n end) end
+	if un then un.Event:Connect(function() live_ability = nil end) end
+end)
+local function current_ability_name()
+	local inst = rawget(ability_hdl, "activeAbility")
+	if type(inst) == "table" and type(rawget(inst, "_name")) == "string" then
+		return inst._name
+	end
+	if live_ability and ability_data[live_ability] then return live_ability end
+	return nil
+end
+local function effective_range(name)
+	name = name or current_ability_name()
+	local d = name and ability_data[name]
+	local base = d and d.range
+	if aim.UseAbilityRange and base then return base end
+	if base then return math.min(aim.MaxDist, base + 15) end
+	return aim.MaxDist
+end
+local function anchor(char)
+	local p = char:FindFirstChild("HumanoidRootPart")
+	        or (char:IsA("Model") and char.PrimaryPart)
+	        or char:FindFirstChild("UpperTorso")
+	        or char:FindFirstChild("Torso")
+	        or char:FindFirstChild("Head")
+	if p and p:IsA("BasePart") then return p end
+end
+local function target_ability_priority(char)
+	if not state_replicator then return 0 end
+	local p = plrs:GetPlayerFromCharacter(char)
+	local ok, pr = pcall(state_replicator.GetReplicatedState, "AbilityPriority", p or char.Name)
+	if ok and type(pr) == "number" then return pr end
+	return 0
+end
+local function my_ability_priority(name)
+	name = name or current_ability_name()
+	local d = name and ability_data[name]
+	return (d and type(d.priority) == "number") and d.priority or 1
+end
+local AIM_EXCLUDED = { Siphon = true, VisSeraPortus = true }
+local function can_affect(char, name)
+	name = name or current_ability_name()
+	if not name then return true end
+	local p = plrs:GetPlayerFromCharacter(char)
+	local arg = p or char.Name
+	if AIM_EXCLUDED[name] then return false end
+	local ok, res = pcall(ability_hdl.canBeAffected, arg, name, true, true)
+	return ok and res == true
+end
+local function osp_can_affect(char, name, d)
+	name = name or current_ability_name()
+	if not name then return false end
+	local p = plrs:GetPlayerFromCharacter(char)
+	local arg = p or char.Name
+	if AIM_EXCLUDED[name] then return false end
+	local ok, res = pcall(ability_hdl.canBeAffected, arg, name, true)
+	return ok and res == true
+end
+local function iter_targets()
+	local out = {}
+	for _, p in ipairs(plrs:GetPlayers()) do
+		if p ~= lp and p.Character then out[p.Character] = true end
+	end
+	local ent = workspace:FindFirstChild("Entities")
+	if ent then
+		for _, c in ipairs(ent:GetChildren()) do
+			if c ~= lp.Character
+			   and (c:FindFirstChild("HumanoidRootPart")
+			        or (c:IsA("Model") and c.PrimaryPart)) then
+				out[c] = true
+			end
+		end
+	end
+	return out
+end
+local osp = { enabled = false, key_on = false }
+local function pick_target()
+	local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
+	local name = current_ability_name()
+	local range = effective_range(name) + 30
+	local m
+	if uis.TouchEnabled and not uis.MouseEnabled then
+		local vs = cam.ViewportSize
+		m = Vector2.new(vs.X / 2, vs.Y / 2)
+	else
+		m = uis:GetMouseLocation()
+	end
+	local best, best_px = nil, math.huge
+	for char in pairs(iter_targets()) do
+		if not is_friend(char) and not is_whitelisted(char) then
+			local hum = char:FindFirstChildOfClass("Humanoid")
+			local a = anchor(char)
+			if hum and hum.Health > 0 and a then
+				local dist = (a.Position - root.Position).Magnitude
+				if dist <= range then
+					local sp, on = cam:WorldToViewportPoint(a.Position)
+					if on and sp.Z > 0 then
+						local dx, dy = sp.X - m.X, sp.Y - m.Y
+						local px = (dx * dx + dy * dy) ^ 0.5
+						if px < best_px then
+							best_px = px
+							best = char
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+local BEHIND_ONLY = {}
+local function is_behind_target(char)
+	if not char then return false end
+	local my_root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local their = char:FindFirstChild("HumanoidRootPart")
+	           or (char:IsA("Model") and char.PrimaryPart)
+	if not (my_root and their) then return false end
+	if char:GetAttribute("ragdoll") == true then return true end
+	local look = their.CFrame.LookVector
+	look = Vector3.new(look.X, 0, look.Z)
+	if look.Magnitude < 0.05 then return true end
+	local dir = (my_root.Position - their.Position)
+	dir = Vector3.new(dir.X, 0, dir.Z)
+	if dir.Magnitude < 0.1 then return true end
+	return look.Unit:Dot(dir.Unit) < 0.3
+end
+local tool_hdl
+pcall(function() tool_hdl = require(lp.PlayerScripts.ModuleScripts.ToolHandler) end)
+local function is_tool_ts(ts, orig, info)
+	if type(orig) == "function" then
+		local ok_s, src = pcall(debug.info, orig, "s")
+		if ok_s and type(src) == "string" and src:find("ToolHandler", 1, true) then
+			return true
+		end
+	end
+	local at = tool_hdl and rawget(tool_hdl, "activeTool")
+	if type(at) == "table" and (rawget(at, "_targetSystem") == ts or at == info) then
+		return true
+	end
+	return false
+end
+local patched = setmetatable({}, { __mode = "k" })
+local wrap_cb
+wrap_cb = function(ts, orig)
+	local kind = ts.TargetType
+	local wrapper = function(info, victim)
+		local cur = aim.Current
+		if not ((aim.Enabled or osp.enabled or osp.key_on) and cur and cur.Parent) then
+			return orig(info, victim)
+		end
+		if is_tool_ts(ts, orig, info) then return orig(info, victim) end
+		local a = anchor(cur)
+		local name = (info and rawget(info, "_name")) or current_ability_name()
+		if name and (AIM_EXCLUDED[name] or tool_data[name]) then return orig(info, victim) end
+		if name and BEHIND_ONLY[name] and not is_behind_target(cur) then
+			return orig(info, victim)
+		end
+		local range = effective_range(name) + 30
+		local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		if not a then return orig(info, victim) end
+		if root and (a.Position - root.Position).Magnitude > range then
+			return orig(info, victim)
+		end
+		if kind == target_type_enum.AreaCheck or kind == target_type_enum.CylinderCast then
+			return { [cur] = true }
+		elseif kind == target_type_enum.CastResult then
+			return a.Position
+		elseif victim ~= nil then
+			if victim == cur then return cur end
+			return nil
+		else
+			return cur, nil
+		end
+	end
+	return newcclosure and newcclosure(wrapper) or wrapper
+end
+local function patch_ts(ts)
+	if patched[ts] or type(ts) ~= "table" or not ts.Callback then return end
+	if is_tool_ts(ts, ts.Callback, nil) then return end
+	patched[ts] = ts.Callback
+	ts.Callback = wrap_cb(ts, ts.Callback)
+end
+for _, t in ipairs(getgc(true)) do
+	if type(t) == "table" then
+		local ok, mt = pcall(getrawmetatable, t)
+		if ok and (mt == ts_mod or (type(mt) == "table" and rawget(mt, "__index") == ts_mod)) then
+			patch_ts(t)
+		end
+	end
+end
+local real_ts_new = ts_mod.new
+local ts_new_wrapper = function(...)
+	local ts = real_ts_new(...)
+	if type(ts) == "table" then
+		patch_ts(ts)
+		task.defer(patch_ts, ts)
+	end
+	return ts
+end
+ts_mod.new = newcclosure and newcclosure(ts_new_wrapper) or ts_new_wrapper
+task.spawn(function()
+	while gg.__coverhub_hub do
+		for _, t in ipairs(getgc(true)) do
+			if type(t) == "table" and not patched[t] then
+				local ok, mt = pcall(getrawmetatable, t)
+				if ok and (mt == ts_mod or (type(mt) == "table" and rawget(mt, "__index") == ts_mod)) then
+					patch_ts(t)
+				end
+			end
+		end
+		task.wait(2)
+	end
+end)
+local function write_target_on(h)
+	if type(h) ~= "table" then return end
+	local _hn = rawget(h, "_name")
+	if type(_hn) == "string" and (AIM_EXCLUDED[_hn] or tool_data[_hn]) then return end
+	local ts = rawget(h, "_targetSystem")
+	if type(ts) ~= "table" then return end
+	local cur = aim.Current
+	if not (cur and cur.Parent) then return end
+	local kind = rawget(ts, "TargetType")
+	if kind == target_type_enum.AreaCheck or kind == target_type_enum.CylinderCast then
+		local vts = rawget(ts, "ValidTargets")
+		if type(vts) == "table" then vts[cur] = true end
+	elseif kind == target_type_enum.CastResult then
+		local a = anchor(cur)
+		if a then rawset(ts, "ValidTargetPoint", a.Position) end
+	else
+		rawset(ts, "ValidTarget", cur)
+	end
+end
+local tw_acc = 0
+local target_write_conn = rsvc.Heartbeat:Connect(function(dt)
+	if not (aim.Enabled or osp.enabled or osp.key_on) then return end
+	tw_acc = tw_acc + dt
+	if tw_acc < 0.05 then return end
+	tw_acc = 0
+	write_target_on(rawget(ability_hdl, "activeAbility"))
+end)
+local real_mouse = lp:GetMouse()
+local MOUSE_HOLDER = { r = real_mouse }
+local mouse_isa = function(_, class)
+	return class == "Mouse" or class == "Instance" or class == "Object"
+end
+local mouse_proxy = setmetatable({}, {
+	__index = function(_, k)
+		if k == "IsA" then return mouse_isa end
+		if k == "ClassName" then return "Mouse" end
+		if aim.Enabled and aim.Current and aim.Current.Parent then
+			local a = anchor(aim.Current)
+			if a then
+				if k == "X" then
+					local sp = cam:WorldToViewportPoint(a.Position)
+					return math.floor(sp.X)
+				elseif k == "Y" then
+					local sp = cam:WorldToViewportPoint(a.Position)
+					return math.floor(sp.Y)
+				elseif k == "Hit" then
+					return CFrame.new(a.Position)
+				elseif k == "Target" then
+					return a
+				elseif k == "UnitRay" then
+					local o = cam.CFrame.Position
+					return Ray.new(o, (a.Position - o).Unit)
+				end
+			end
+		end
+		return MOUSE_HOLDER.r[k]
+	end,
+	__newindex = function(_, k, v) MOUSE_HOLDER.r[k] = v end,
+})
+task.spawn(function()
+	task.wait(0.5)
+	local swapped = 0
+	for _, fn in ipairs(getgc(true)) do
+		if type(fn) == "function" then
+			local ok_s, src = pcall(debug.info, fn, "s")
+			if ok_s and (src == "" or src == nil) then
+			else
+				local ok, ups = pcall(getupvalues, fn)
+				if ok and type(ups) == "table" then
+					for i, v in ipairs(ups) do
+						if v == real_mouse then
+							pcall(setupvalue, fn, i, mouse_proxy)
+							swapped += 1
+						end
+					end
+				end
+			end
+		end
+	end
+	if DEBUG then print("[aim] mouse upvalues swapped:", swapped) end
+end)
+
+do
+	local function proj_target_pos()
+		if not (aim.Enabled and aim.Current and aim.Current.Parent) then return nil end
+		local a = anchor(aim.Current)
+		if not a then return nil end
+		return a.Position, a
+	end
+	local function caller_is_engine()
+		for i = 2, 8 do
+			local src = debug.info(i, "s")
+			if not src or src == "" then break end
+			if src:find("CameraModule", 1, true)
+			   or src:find("PlayerModule", 1, true)
+			   or src:find("Popper", 1, true)
+			   or src:find("ControlModule", 1, true) then
+				return true
+			end
+		end
+		return false
+	end
+	local old_namecall
+	old_namecall = hookmetamethod(game, "__namecall", function(self, ...)
+		local method = getnamecallmethod()
+		if method == "ScreenPointToRay" or method == "ViewportPointToRay" then
+			if self == cam and not caller_is_engine() then
+				local pos = proj_target_pos()
+				if pos then
+					local origin = cam.CFrame.Position
+					local dir = (pos - origin)
+					local len = dir.Magnitude
+					if len > 0.001 then
+						return Ray.new(origin, dir.Unit)
+					end
+				end
+			end
+		elseif method == "Raycast" then
+			if self == workspace and not caller_is_engine() then
+				local args = { ... }
+				local origin, direction = args[1], args[2]
+				if typeof(origin) == "Vector3" and typeof(direction) == "Vector3" and direction.Magnitude > 0 then
+					local pos, part = proj_target_pos()
+					if pos then
+						local to_target = pos - origin
+						local tt_len = to_target.Magnitude
+						if tt_len > 0.001 then
+							local tt_unit = to_target.Unit
+							local ray_unit = direction.Unit
+							if tt_unit:Dot(ray_unit) > 0.985 and direction.Magnitude >= tt_len * 0.9 then
+								return {
+									Position = pos,
+									Instance = part,
+									Normal = -ray_unit,
+									Material = Enum.Material.Plastic,
+									Distance = tt_len,
+								}
+							end
+						end
+					end
+				end
+			end
+		end
+		return old_namecall(self, ...)
+	end)
+end
+
+gg.__coverhub_hub = true
+local Library = {
+	Flags = {},
+	SetFlags = {},
+	MenuKeybind = tostring(Enum.KeyCode.LeftControl),
+	_conns = {},
+	_gui = nil,
+}
+do
+	local THEME = {
+		Bg         = Color3.fromRGB(16, 18, 24),
+		TopBar     = Color3.fromRGB(22, 25, 34),
+		Sidebar    = Color3.fromRGB(20, 22, 30),
+		Section    = Color3.fromRGB(24, 27, 36),
+		Item       = Color3.fromRGB(31, 35, 46),
+		ItemHover  = Color3.fromRGB(38, 43, 56),
+		Stroke     = Color3.fromRGB(48, 53, 68),
+		Accent     = Color3.fromRGB(88, 101, 242),
+		AccentDim  = Color3.fromRGB(58, 68, 170),
+		Text       = Color3.fromRGB(235, 238, 245),
+		TextDim    = Color3.fromRGB(150, 156, 172),
+		Danger     = Color3.fromRGB(210, 65, 65),
+	}
+	local PAGE_DEFAULT_NAMES = { "Combat", "Player ESP", "Automation", "Visuals", "Settings" }
+	local function track_conn(c)
+		table.insert(Library._conns, c)
+		return c
+	end
+	local function corner(parent, r)
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, r or 6)
+		c.Parent = parent
+		return c
+	end
+	local function stroke(parent, col, th, tr)
+		local s = Instance.new("UIStroke")
+		s.Color = col or THEME.Stroke
+		s.Thickness = th or 1
+		s.Transparency = tr or 0.35
+		s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+		s.Parent = parent
+		return s
+	end
+	local function pad(parent, t, b, l, r)
+		local p = Instance.new("UIPadding")
+		p.PaddingTop = UDim.new(0, t or 0)
+		p.PaddingBottom = UDim.new(0, b or 0)
+		p.PaddingLeft = UDim.new(0, l or 0)
+		p.PaddingRight = UDim.new(0, r or 0)
+		p.Parent = parent
+		return p
+	end
+	local function short_key_name(k)
+		local s = tostring(k or "LeftControl")
+		s = s:gsub("Enum%.KeyCode%.", ""):gsub("Enum%.UserInputType%.", "")
+		return s
+	end
+
+	function Library:Window(wopts)
+		wopts = wopts or {}
+		local cg = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+		local gui = Instance.new("ScreenGui")
+		gui.Name = rand_gui_name()
+		gui.ResetOnSpawn = false
+		gui.IgnoreGuiInset = true
+		gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		gui.DisplayOrder = 150
+		pcall(function() gui.Parent = cg end)
+		if not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
+		Library._gui = gui
+
+		local FULL_SIZE = UDim2.fromOffset(640, 440)
+		local MIN_SIZE  = UDim2.fromOffset(640, 40)
+		local minimized = false
+
+		local main = Instance.new("Frame")
+		main.Name = "MainWindow"
+		main.AnchorPoint = Vector2.new(0.5, 0.5)
+		main.Position = UDim2.fromScale(0.5, 0.5)
+		main.Size = FULL_SIZE
+		main.BackgroundColor3 = THEME.Bg
+		main.BorderSizePixel = 0
+		main.ClipsDescendants = true
+		main.Parent = gui
+		corner(main, 10)
+		stroke(main, THEME.Stroke, 1, 0.2)
+
+		local topbar = Instance.new("Frame")
+		topbar.Name = "TopBar"
+		topbar.Size = UDim2.new(1, 0, 0, 40)
+		topbar.BackgroundColor3 = THEME.TopBar
+		topbar.BorderSizePixel = 0
+		topbar.Parent = main
+		corner(topbar, 10)
+
+		local topbar_fix = Instance.new("Frame")
+		topbar_fix.Size = UDim2.new(1, 0, 0, 10)
+		topbar_fix.Position = UDim2.new(0, 0, 1, -10)
+		topbar_fix.BackgroundColor3 = THEME.TopBar
+		topbar_fix.BorderSizePixel = 0
+		topbar_fix.Parent = topbar
+
+		local top_divider = Instance.new("Frame")
+		top_divider.Size = UDim2.new(1, 0, 0, 1)
+		top_divider.Position = UDim2.new(0, 0, 1, -1)
+		top_divider.BackgroundColor3 = THEME.Stroke
+		top_divider.BackgroundTransparency = 0.4
+		top_divider.BorderSizePixel = 0
+		top_divider.Parent = topbar
+
+		local title_lbl = Instance.new("TextLabel")
+		title_lbl.BackgroundTransparency = 1
+		title_lbl.Position = UDim2.fromOffset(14, 0)
+		title_lbl.Size = UDim2.new(0, 260, 1, 0)
+		title_lbl.Font = Enum.Font.GothamBold
+		title_lbl.TextSize = 14
+		title_lbl.TextColor3 = THEME.Text
+		title_lbl.TextXAlignment = Enum.TextXAlignment.Left
+		title_lbl.RichText = true
+		title_lbl.Text = string.format('%s  <font color="rgb(88,101,242)">%s</font>',
+			wopts.Name or "Cover Hub", wopts.SubTitle or "Essential")
+		title_lbl.Parent = topbar
+
+		local kb_badge = Instance.new("TextLabel")
+		kb_badge.BackgroundTransparency = 1
+		kb_badge.AnchorPoint = Vector2.new(1, 0.5)
+		kb_badge.Position = UDim2.new(1, -78, 0.5, 0)
+		kb_badge.Size = UDim2.fromOffset(110, 22)
+		kb_badge.Font = Enum.Font.GothamMedium
+		kb_badge.TextSize = 11
+		kb_badge.TextColor3 = THEME.TextDim
+		kb_badge.TextXAlignment = Enum.TextXAlignment.Right
+		kb_badge.Text = "[" .. short_key_name(Library.MenuKeybind) .. "]"
+		kb_badge.Parent = topbar
+
+		local min_btn = Instance.new("TextButton")
+		min_btn.AnchorPoint = Vector2.new(1, 0.5)
+		min_btn.Position = UDim2.new(1, -42, 0.5, 0)
+		min_btn.Size = UDim2.fromOffset(26, 26)
+		min_btn.BackgroundColor3 = THEME.Item
+		min_btn.BorderSizePixel = 0
+		min_btn.Font = Enum.Font.GothamBold
+		min_btn.TextSize = 14
+		min_btn.TextColor3 = THEME.Text
+		min_btn.Text = "-"
+		min_btn.AutoButtonColor = true
+		min_btn.Parent = topbar
+		corner(min_btn, 6)
+
+		local close_btn = Instance.new("TextButton")
+		close_btn.AnchorPoint = Vector2.new(1, 0.5)
+		close_btn.Position = UDim2.new(1, -10, 0.5, 0)
+		close_btn.Size = UDim2.fromOffset(26, 26)
+		close_btn.BackgroundColor3 = Color3.fromRGB(48, 30, 36)
+		close_btn.BorderSizePixel = 0
+		close_btn.Font = Enum.Font.GothamBold
+		close_btn.TextSize = 13
+		close_btn.TextColor3 = Color3.fromRGB(240, 110, 110)
+		close_btn.Text = "X"
+		close_btn.AutoButtonColor = true
+		close_btn.Parent = topbar
+		corner(close_btn, 6)
+
+		local body = Instance.new("Frame")
+		body.Name = "Body"
+		body.Position = UDim2.fromOffset(0, 40)
+		body.Size = UDim2.new(1, 0, 1, -40)
+		body.BackgroundTransparency = 1
+		body.Parent = main
+
+		min_btn.MouseButton1Click:Connect(function()
+			minimized = not minimized
+			body.Visible = not minimized
+			main.Size = minimized and MIN_SIZE or FULL_SIZE
+			min_btn.Text = minimized and "+" or "-"
+		end)
+
+		close_btn.MouseButton1Click:Connect(function()
+			main.Visible = false
+		end)
+
+		do
+			local dragging, drag_start, start_pos = false, nil, nil
+			track_conn(topbar.InputBegan:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1
+				   or input.UserInputType == Enum.UserInputType.Touch then
+					dragging = true
+					drag_start = input.Position
+					start_pos = main.Position
+				end
+			end))
+			track_conn(topbar.InputEnded:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseButton1
+				   or input.UserInputType == Enum.UserInputType.Touch then
+					dragging = false
+				end
+			end))
+			track_conn(uis.InputChanged:Connect(function(input)
+				if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				   or input.UserInputType == Enum.UserInputType.Touch) then
+					local delta = input.Position - drag_start
+					main.Position = UDim2.new(
+						start_pos.X.Scale, start_pos.X.Offset + delta.X,
+						start_pos.Y.Scale, start_pos.Y.Offset + delta.Y
+					)
+				end
+			end))
+		end
+
+		local sidebar = Instance.new("Frame")
+		sidebar.Name = "Sidebar"
+		sidebar.Size = UDim2.new(0, 140, 1, 0)
+		sidebar.BackgroundColor3 = THEME.Sidebar
+		sidebar.BorderSizePixel = 0
+		sidebar.Parent = body
+
+		local side_div = Instance.new("Frame")
+		side_div.Size = UDim2.new(0, 1, 1, 0)
+		side_div.Position = UDim2.new(1, -1, 0, 0)
+		side_div.BackgroundColor3 = THEME.Stroke
+		side_div.BackgroundTransparency = 0.4
+		side_div.BorderSizePixel = 0
+		side_div.Parent = sidebar
+
+		local tab_holder = Instance.new("Frame")
+		tab_holder.Size = UDim2.new(1, 0, 1, 0)
+		tab_holder.BackgroundTransparency = 1
+		tab_holder.Parent = sidebar
+		pad(tab_holder, 10, 10, 8, 9)
+		local tab_layout = Instance.new("UIListLayout")
+		tab_layout.FillDirection = Enum.FillDirection.Vertical
+		tab_layout.Padding = UDim.new(0, 5)
+		tab_layout.SortOrder = Enum.SortOrder.LayoutOrder
+		tab_layout.Parent = tab_holder
+
+		local pages_area = Instance.new("Frame")
+		pages_area.Name = "PagesArea"
+		pages_area.Position = UDim2.fromOffset(140, 0)
+		pages_area.Size = UDim2.new(1, -140, 1, 0)
+		pages_area.BackgroundTransparency = 1
+		pages_area.Parent = body
+
+		Library.SetFlags["Menu Keybind"] = function(k)
+			Library.MenuKeybind = tostring(k)
+			kb_badge.Text = "[" .. short_key_name(Library.MenuKeybind) .. "]"
+		end
+
+		track_conn(uis.InputBegan:Connect(function(input, gpe)
+			if uis:GetFocusedTextBox() then return end
+			if Library._binding_key then return end
+			local want = short_key_name(Library.MenuKeybind)
+			local kc = input.KeyCode and input.KeyCode.Name or nil
+			local uit = input.UserInputType and input.UserInputType.Name or nil
+			if kc == want or uit == want then
+				main.Visible = not main.Visible
+			end
+		end))
+
+		local win = {
+			_main = main,
+			_pages = {},
+			_active_page = nil,
+		}
+
+		local function select_page(pg)
+			win._active_page = pg
+			for _, p in ipairs(win._pages) do
+				local on = (p == pg)
+				p._frame.Visible = on
+				p._btn.BackgroundColor3 = on and THEME.Accent or THEME.Item
+				p._btn.BackgroundTransparency = on and 0 or 0.45
+				p._btn.TextColor3 = on and THEME.Text or THEME.TextDim
+			end
+		end
+
+		function win:Page(popts)
+			popts = popts or {}
+			local idx = #win._pages + 1
+			local pname = popts.Name or PAGE_DEFAULT_NAMES[idx] or ("Page " .. tostring(idx))
+
+			local tbtn = Instance.new("TextButton")
+			tbtn.Name = pname
+			tbtn.LayoutOrder = idx
+			tbtn.Size = UDim2.new(1, 0, 0, 32)
+			tbtn.BackgroundColor3 = THEME.Item
+			tbtn.BackgroundTransparency = 0.45
+			tbtn.BorderSizePixel = 0
+			tbtn.Font = Enum.Font.GothamSemibold
+			tbtn.TextSize = 12
+			tbtn.TextColor3 = THEME.TextDim
+			tbtn.TextXAlignment = Enum.TextXAlignment.Left
+			tbtn.Text = "   " .. pname
+			tbtn.AutoButtonColor = true
+			tbtn.Parent = tab_holder
+			corner(tbtn, 6)
+
+			local pframe = Instance.new("Frame")
+			pframe.Name = pname .. "_Page"
+			pframe.Size = UDim2.new(1, 0, 1, 0)
+			pframe.BackgroundTransparency = 1
+			pframe.Visible = false
+			pframe.Parent = pages_area
+			pad(pframe, 10, 10, 10, 10)
+
+			local function make_col(x_scale, x_off)
+				local sf = Instance.new("ScrollingFrame")
+				sf.Position = UDim2.new(x_scale, x_off, 0, 0)
+				sf.Size = UDim2.new(0.5, -5, 1, 0)
+				sf.BackgroundTransparency = 1
+				sf.BorderSizePixel = 0
+				sf.ScrollBarThickness = 3
+				sf.ScrollBarImageColor3 = THEME.Accent
+				sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+				sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+				sf.Parent = pframe
+				local lay = Instance.new("UIListLayout")
+				lay.FillDirection = Enum.FillDirection.Vertical
+				lay.Padding = UDim.new(0, 8)
+				lay.SortOrder = Enum.SortOrder.LayoutOrder
+				lay.Parent = sf
+				return sf
+			end
+
+			local col1 = make_col(0, 0)
+			local col2 = make_col(0.5, 5)
+
+			local pg = {
+				_btn = tbtn,
+				_frame = pframe,
+				_cols = { col1, col2 },
+				_sec_count = 0,
+			}
+			table.insert(win._pages, pg)
+			tbtn.MouseButton1Click:Connect(function() select_page(pg) end)
+			if #win._pages == 1 then select_page(pg) end
+
+			function pg:Section(sopts)
+				sopts = sopts or {}
+				pg._sec_count += 1
+				local side = (sopts.Side == 2) and 2 or 1
+				local parent_col = pg._cols[side]
+
+				local sframe = Instance.new("Frame")
+				sframe.Name = sopts.Name or "Section"
+				sframe.LayoutOrder = pg._sec_count
+				sframe.Size = UDim2.new(1, -4, 0, 0)
+				sframe.AutomaticSize = Enum.AutomaticSize.Y
+				sframe.BackgroundColor3 = THEME.Section
+				sframe.BorderSizePixel = 0
+				sframe.Parent = parent_col
+				corner(sframe, 8)
+				stroke(sframe, THEME.Stroke, 1, 0.45)
+				pad(sframe, 8, 10, 10, 10)
+
+				local slayout = Instance.new("UIListLayout")
+				slayout.FillDirection = Enum.FillDirection.Vertical
+				slayout.Padding = UDim.new(0, 6)
+				slayout.SortOrder = Enum.SortOrder.LayoutOrder
+				slayout.Parent = sframe
+
+				local shdr = Instance.new("TextLabel")
+				shdr.LayoutOrder = 0
+				shdr.Size = UDim2.new(1, 0, 0, 18)
+				shdr.BackgroundTransparency = 1
+				shdr.Font = Enum.Font.GothamBold
+				shdr.TextSize = 12
+				shdr.TextColor3 = THEME.Accent
+				shdr.TextXAlignment = Enum.TextXAlignment.Left
+				shdr.Text = string.upper(sopts.Name or "SECTION")
+				shdr.Parent = sframe
+
+				local sec = { _frame = sframe, _order = 0 }
+
+				function sec:Toggle(topts)
+					topts = topts or {}
+					sec._order += 1
+					local state = (topts.Default == true)
+					if topts.Flag then Library.Flags[topts.Flag] = state end
+
+					local wrap = Instance.new("Frame")
+					wrap.LayoutOrder = sec._order
+					wrap.Size = UDim2.new(1, 0, 0, 0)
+					wrap.AutomaticSize = Enum.AutomaticSize.Y
+					wrap.BackgroundTransparency = 1
+					wrap.Parent = sframe
+
+					local wlay = Instance.new("UIListLayout")
+					wlay.FillDirection = Enum.FillDirection.Vertical
+					wlay.Padding = UDim.new(0, 4)
+					wlay.SortOrder = Enum.SortOrder.LayoutOrder
+					wlay.Parent = wrap
+
+					local row = Instance.new("TextButton")
+					row.LayoutOrder = 1
+					row.Size = UDim2.new(1, 0, 0, 28)
+					row.BackgroundColor3 = THEME.Item
+					row.BorderSizePixel = 0
+					row.Text = ""
+					row.AutoButtonColor = true
+					row.Parent = wrap
+					corner(row, 6)
+
+					local lbl = Instance.new("TextLabel")
+					lbl.BackgroundTransparency = 1
+					lbl.Position = UDim2.fromOffset(9, 0)
+					lbl.Size = UDim2.new(1, -68, 1, 0)
+					lbl.Font = Enum.Font.Gotham
+				lbl.TextSize = 12
+					lbl.TextColor3 = state and THEME.Text or THEME.TextDim
+					lbl.TextXAlignment = Enum.TextXAlignment.Left
+					lbl.TextTruncate = Enum.TextTruncate.AtEnd
+					lbl.Text = topts.Name or "toggle"
+					lbl.Parent = row
+
+					local pill = Instance.new("Frame")
+					pill.AnchorPoint = Vector2.new(1, 0.5)
+					pill.Position = UDim2.new(1, -8, 0.5, 0)
+					pill.Size = UDim2.fromOffset(32, 16)
+					pill.BackgroundColor3 = state and THEME.Accent or Color3.fromRGB(52, 56, 70)
+					pill.BorderSizePixel = 0
+					pill.Parent = row
+					corner(pill, 8)
+
+					local knob = Instance.new("Frame")
+					knob.AnchorPoint = Vector2.new(0, 0.5)
+					knob.Position = state and UDim2.new(1, -14, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+					knob.Size = UDim2.fromOffset(12, 12)
+					knob.BackgroundColor3 = Color3.new(1, 1, 1)
+					knob.BorderSizePixel = 0
+					knob.Parent = pill
+					corner(knob, 6)
+
+					local function set_toggle(v)
+						state = (v == true)
+						if topts.Flag then Library.Flags[topts.Flag] = state end
+						pill.BackgroundColor3 = state and THEME.Accent or Color3.fromRGB(52, 56, 70)
+						knob.Position = state and UDim2.new(1, -14, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+						lbl.TextColor3 = state and THEME.Text or THEME.TextDim
+						if topts.Callback then pcall(topts.Callback, state) end
+					end
+
+					row.MouseButton1Click:Connect(function() set_toggle(not state) end)
+
+					local tobj = { Set = set_toggle }
+
+					function tobj:Colorpicker(cpopts)
+						cpopts = cpopts or {}
+						local cur_col = cpopts.Default or Color3.fromRGB(88, 101, 242)
+						if cpopts.Flag then Library.Flags[cpopts.Flag] = cur_col end
+
+						local sw_btn = Instance.new("TextButton")
+						sw_btn.AnchorPoint = Vector2.new(1, 0.5)
+						sw_btn.Position = UDim2.new(1, -46, 0.5, 0)
+						sw_btn.Size = UDim2.fromOffset(20, 14)
+						sw_btn.BackgroundColor3 = cur_col
+						sw_btn.BorderSizePixel = 0
+						sw_btn.Text = ""
+						sw_btn.AutoButtonColor = true
+						sw_btn.Parent = row
+						corner(sw_btn, 4)
+						stroke(sw_btn, Color3.new(1, 1, 1), 1, 0.6)
+
+						local drawer = Instance.new("Frame")
+						drawer.LayoutOrder = 2
+						drawer.Size = UDim2.new(1, 0, 0, 88)
+						drawer.BackgroundColor3 = Color3.fromRGB(20, 23, 31)
+						drawer.BorderSizePixel = 0
+						drawer.Visible = false
+						drawer.Parent = wrap
+						corner(drawer, 6)
+						pad(drawer, 6, 6, 8, 8)
+
+						local r_val = math.floor(cur_col.R * 255 + 0.5)
+						local g_val = math.floor(cur_col.G * 255 + 0.5)
+						local b_val = math.floor(cur_col.B * 255 + 0.5)
+						local update_bars
+
+						local function apply_rgb()
+							cur_col = Color3.fromRGB(r_val, g_val, b_val)
+							sw_btn.BackgroundColor3 = cur_col
+							if cpopts.Flag then Library.Flags[cpopts.Flag] = cur_col end
+							if cpopts.Callback then pcall(cpopts.Callback, cur_col) end
+						end
+
+						local function make_rgb_bar(label_txt, y_off, init_v, ch_col, setter)
+							local cl = Instance.new("TextLabel")
+							cl.BackgroundTransparency = 1
+							cl.Position = UDim2.fromOffset(0, y_off)
+							cl.Size = UDim2.fromOffset(38, 18)
+							cl.Font = Enum.Font.GothamMedium
+							cl.TextSize = 10
+							cl.TextColor3 = THEME.TextDim
+							cl.TextXAlignment = Enum.TextXAlignment.Left
+							cl.Text = label_txt .. ": " .. tostring(init_v)
+							cl.Parent = drawer
+
+							local bar = Instance.new("Frame")
+							bar.Position = UDim2.fromOffset(42, y_off + 5)
+							bar.Size = UDim2.new(1, -44, 0, 8)
+							bar.BackgroundColor3 = THEME.Item
+							bar.BorderSizePixel = 0
+							bar.Parent = drawer
+							corner(bar, 4)
+
+							local fill = Instance.new("Frame")
+							fill.Size = UDim2.new(init_v / 255, 0, 1, 0)
+							fill.BackgroundColor3 = ch_col
+							fill.BorderSizePixel = 0
+							fill.Parent = bar
+							corner(fill, 4)
+
+							local sliding = false
+							local function set_from_x(x)
+								local w = math.max(1, bar.AbsoluteSize.X)
+								local rel = math.clamp((x - bar.AbsolutePosition.X) / w, 0, 1)
+								local v = math.floor(rel * 255 + 0.5)
+								fill.Size = UDim2.new(v / 255, 0, 1, 0)
+								cl.Text = label_txt .. ": " .. tostring(v)
+								setter(v)
+								apply_rgb()
+							end
+							track_conn(bar.InputBegan:Connect(function(inp)
+								if inp.UserInputType == Enum.UserInputType.MouseButton1
+								   or inp.UserInputType == Enum.UserInputType.Touch then
+									sliding = true
+									set_from_x(inp.Position.X)
+								end
+							end))
+							track_conn(uis.InputEnded:Connect(function(inp)
+								if inp.UserInputType == Enum.UserInputType.MouseButton1
+								   or inp.UserInputType == Enum.UserInputType.Touch then
+									sliding = false
+								end
+							end))
+							track_conn(uis.InputChanged:Connect(function(inp)
+								if sliding and (inp.UserInputType == Enum.UserInputType.MouseMovement
+								   or inp.UserInputType == Enum.UserInputType.Touch) then
+									set_from_x(inp.Position.X)
+								end
+							end))
+							return function(v)
+								fill.Size = UDim2.new(v / 255, 0, 1, 0)
+								cl.Text = label_txt .. ": " .. tostring(v)
+							end
+						end
+
+						local set_r_ui = make_rgb_bar("R", 2,  r_val, Color3.fromRGB(230, 75, 75),  function(v) r_val = v end)
+						local set_g_ui = make_rgb_bar("G", 26, g_val, Color3.fromRGB(75, 220, 115), function(v) g_val = v end)
+						local set_b_ui = make_rgb_bar("B", 50, b_val, Color3.fromRGB(80, 140, 245), function(v) b_val = v end)
+						update_bars = function()
+							set_r_ui(r_val); set_g_ui(g_val); set_b_ui(b_val)
+						end
+
+						sw_btn.MouseButton1Click:Connect(function()
+							drawer.Visible = not drawer.Visible
+						end)
+						return tobj
+					end
+
+					return tobj
+				end
+
+				function sec:Slider(slopts)
+					slopts = slopts or {}
+					sec._order += 1
+					local min_v = slopts.Min or 0
+					local max_v = slopts.Max or 100
+					local cur_v = math.clamp(slopts.Default or min_v, min_v, max_v)
+					local suffix = slopts.Suffix or ""
+					if slopts.Flag then Library.Flags[slopts.Flag] = cur_v end
+
+					local box = Instance.new("Frame")
+					box.LayoutOrder = sec._order
+					box.Size = UDim2.new(1, 0, 0, 42)
+					box.BackgroundColor3 = THEME.Item
+					box.BorderSizePixel = 0
+					box.Parent = sframe
+					corner(box, 6)
+					pad(box, 5, 6, 9, 9)
+
+					local n_lbl = Instance.new("TextLabel")
+					n_lbl.BackgroundTransparency = 1
+					n_lbl.Size = UDim2.new(0.6, 0, 0, 16)
+					n_lbl.Font = Enum.Font.Gotham
+					n_lbl.TextSize = 12
+					n_lbl.TextColor3 = THEME.Text
+					n_lbl.TextXAlignment = Enum.TextXAlignment.Left
+					n_lbl.Text = slopts.Name or "slider"
+					n_lbl.Parent = box
+
+					local v_lbl = Instance.new("TextLabel")
+					v_lbl.BackgroundTransparency = 1
+					v_lbl.Position = UDim2.new(0.6, 0, 0, 0)
+					v_lbl.Size = UDim2.new(0.4, 0, 0, 16)
+					v_lbl.Font = Enum.Font.GothamSemibold
+					v_lbl.TextSize = 11
+					v_lbl.TextColor3 = THEME.Accent
+					v_lbl.TextXAlignment = Enum.TextXAlignment.Right
+					v_lbl.Text = tostring(cur_v) .. suffix
+					v_lbl.Parent = box
+
+					local track = Instance.new("Frame")
+					track.Position = UDim2.fromOffset(0, 22)
+					track.Size = UDim2.new(1, 0, 0, 7)
+					track.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+					track.BorderSizePixel = 0
+					track.Parent = box
+					corner(track, 4)
+
+					local fill = Instance.new("Frame")
+					fill.Size = UDim2.new((cur_v - min_v) / math.max(1, max_v - min_v), 0, 1, 0)
+					fill.BackgroundColor3 = THEME.Accent
+					fill.BorderSizePixel = 0
+					fill.Parent = track
+					corner(fill, 4)
+
+					local sl_obj = {}
+					function sl_obj:SetValue(v, fire_cb)
+						v = math.clamp(math.floor(v + 0.5), min_v, max_v)
+						cur_v = v
+						if slopts.Flag then Library.Flags[slopts.Flag] = cur_v end
+						fill.Size = UDim2.new((cur_v - min_v) / math.max(1, max_v - min_v), 0, 1, 0)
+						v_lbl.Text = tostring(cur_v) .. suffix
+						if fire_cb and slopts.Callback then pcall(slopts.Callback, cur_v) end
+					end
+
+					local dragging_sl = false
+					local function update_from_input(x)
+						local w = math.max(1, track.AbsoluteSize.X)
+						local rel = math.clamp((x - track.AbsolutePosition.X) / w, 0, 1)
+						local val = min_v + (max_v - min_v) * rel
+						sl_obj:SetValue(val, true)
+					end
+
+					track_conn(box.InputBegan:Connect(function(inp)
+						if inp.UserInputType == Enum.UserInputType.MouseButton1
+						   or inp.UserInputType == Enum.UserInputType.Touch then
+							dragging_sl = true
+							update_from_input(inp.Position.X)
+						end
+					end))
+					track_conn(uis.InputEnded:Connect(function(inp)
+						if inp.UserInputType == Enum.UserInputType.MouseButton1
+						   or inp.UserInputType == Enum.UserInputType.Touch then
+							dragging_sl = false
+						end
+					end))
+					track_conn(uis.InputChanged:Connect(function(inp)
+						if dragging_sl and (inp.UserInputType == Enum.UserInputType.MouseMovement
+						   or inp.UserInputType == Enum.UserInputType.Touch) then
+							update_from_input(inp.Position.X)
+						end
+					end))
+
+					return sl_obj
+				end
+
+				function sec:Dropdown(dopts)
+					dopts = dopts or {}
+					sec._order += 1
+					local is_multi = (dopts.Multi == true)
+					local items = dopts.Items or {}
+					local selected_multi = {}
+					local selected_single = dopts.Default
+					if is_multi and type(dopts.Default) == "table" then
+						for _, v in ipairs(dopts.Default) do selected_multi[v] = true end
+					end
+
+					local wrap = Instance.new("Frame")
+					wrap.LayoutOrder = sec._order
+					wrap.Size = UDim2.new(1, 0, 0, 0)
+					wrap.AutomaticSize = Enum.AutomaticSize.Y
+					wrap.BackgroundTransparency = 1
+					wrap.Parent = sframe
+
+					local wlay = Instance.new("UIListLayout")
+					wlay.FillDirection = Enum.FillDirection.Vertical
+					wlay.Padding = UDim.new(0, 4)
+					wlay.SortOrder = Enum.SortOrder.LayoutOrder
+					wlay.Parent = wrap
+
+					local hdr_btn = Instance.new("TextButton")
+					hdr_btn.LayoutOrder = 1
+					hdr_btn.Size = UDim2.new(1, 0, 0, 28)
+					hdr_btn.BackgroundColor3 = THEME.Item
+					hdr_btn.BorderSizePixel = 0
+					hdr_btn.Text = ""
+					hdr_btn.AutoButtonColor = true
+					hdr_btn.Parent = wrap
+					corner(hdr_btn, 6)
+
+					local d_lbl = Instance.new("TextLabel")
+					d_lbl.BackgroundTransparency = 1
+					d_lbl.Position = UDim2.fromOffset(9, 0)
+					d_lbl.Size = UDim2.new(1, -18, 1, 0)
+					d_lbl.Font = Enum.Font.Gotham
+					d_lbl.TextSize = 12
+					d_lbl.TextColor3 = THEME.Text
+					d_lbl.TextXAlignment = Enum.TextXAlignment.Left
+					d_lbl.TextTruncate = Enum.TextTruncate.AtEnd
+					d_lbl.Parent = hdr_btn
+
+					local list_frame = Instance.new("ScrollingFrame")
+					list_frame.LayoutOrder = 2
+					list_frame.Size = UDim2.new(1, 0, 0, math.min(dopts.MaxSize or 130, 130))
+					list_frame.BackgroundColor3 = Color3.fromRGB(20, 22, 30)
+					list_frame.BorderSizePixel = 0
+					list_frame.ScrollBarThickness = 3
+					list_frame.ScrollBarImageColor3 = THEME.Accent
+					list_frame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+					list_frame.CanvasSize = UDim2.new(0, 0, 0, 0)
+					list_frame.Visible = false
+					list_frame.Parent = wrap
+					corner(list_frame, 6)
+					pad(list_frame, 4, 4, 4, 4)
+
+					local llay = Instance.new("UIListLayout")
+					llay.FillDirection = Enum.FillDirection.Vertical
+					llay.Padding = UDim.new(0, 3)
+					llay.SortOrder = Enum.SortOrder.LayoutOrder
+					llay.Parent = list_frame
+
+					local function update_header_text()
+						if is_multi then
+							local arr = {}
+							for k, v in pairs(selected_multi) do
+								if v then table.insert(arr, tostring(k)) end
+							end
+							table.sort(arr)
+							if dopts.Flag then Library.Flags[dopts.Flag] = arr end
+							local sum = (#arr > 0) and table.concat(arr, ", ") or "none"
+							d_lbl.Text = string.format("%s: %s", dopts.Name or "select", sum)
+						else
+							if dopts.Flag then Library.Flags[dopts.Flag] = selected_single end
+							d_lbl.Text = string.format("%s: %s", dopts.Name or "select", tostring(selected_single or "none"))
+						end
+					end
+
+					local function rebuild_items()
+						for _, ch in ipairs(list_frame:GetChildren()) do
+							if ch:IsA("TextButton") then ch:Destroy() end
+						end
+						for i, item in ipairs(items) do
+							local ibtn = Instance.new("TextButton")
+							ibtn.LayoutOrder = i
+							ibtn.Size = UDim2.new(1, -4, 0, 24)
+							local is_on = is_multi and (selected_multi[item] == true) or (selected_single == item)
+							ibtn.BackgroundColor3 = is_on and THEME.AccentDim or THEME.Item
+							ibtn.BorderSizePixel = 0
+							ibtn.Font = Enum.Font.Gotham
+							ibtn.TextSize = 11
+							ibtn.TextColor3 = is_on and THEME.Text or THEME.TextDim
+							ibtn.Text = tostring(item)
+							ibtn.AutoButtonColor = true
+							ibtn.Parent = list_frame
+							corner(ibtn, 4)
+							ibtn.MouseButton1Click:Connect(function()
+								if is_multi then
+									selected_multi[item] = not selected_multi[item]
+									update_header_text()
+									rebuild_items()
+									if dopts.Callback then pcall(dopts.Callback, Library.Flags[dopts.Flag]) end
+								else
+									selected_single = item
+									update_header_text()
+									rebuild_items()
+									list_frame.Visible = false
+									if dopts.Callback then pcall(dopts.Callback, selected_single) end
+								end
+							end)
+						end
+					end
+
+					update_header_text()
+					rebuild_items()
+					hdr_btn.MouseButton1Click:Connect(function()
+						list_frame.Visible = not list_frame.Visible
+					end)
+
+					local dobj = {}
+					function dobj:Refresh(new_items)
+						items = type(new_items) == "table" and new_items or {}
+						rebuild_items()
+						update_header_text()
+					end
+					return dobj
+				end
+
+				function sec:Label(text)
+					sec._order += 1
+					local row = Instance.new("Frame")
+					row.LayoutOrder = sec._order
+					row.Size = UDim2.new(1, 0, 0, 28)
+					row.BackgroundColor3 = THEME.Item
+					row.BorderSizePixel = 0
+					row.Parent = sframe
+					corner(row, 6)
+
+					local lbl = Instance.new("TextLabel")
+					lbl.BackgroundTransparency = 1
+					lbl.Position = UDim2.fromOffset(9, 0)
+					lbl.Size = UDim2.new(1, -80, 1, 0)
+					lbl.Font = Enum.Font.Gotham
+					lbl.TextSize = 12
+					lbl.TextColor3 = THEME.Text
+					lbl.TextXAlignment = Enum.TextXAlignment.Left
+					lbl.Text = tostring(text or "")
+					lbl.Parent = row
+
+					local lobj = {}
+					function lobj:Keybind(kbopts)
+						kbopts = kbopts or {}
+						local cur_key = tostring(kbopts.Default or Enum.KeyCode.R)
+						local flag_tbl = { Key = cur_key, Mode = kbopts.Mode or "Toggle" }
+						if kbopts.Flag then Library.Flags[kbopts.Flag] = flag_tbl end
+
+						local kbtn = Instance.new("TextButton")
+						kbtn.AnchorPoint = Vector2.new(1, 0.5)
+						kbtn.Position = UDim2.new(1, -6, 0.5, 0)
+						kbtn.Size = UDim2.fromOffset(68, 20)
+						kbtn.BackgroundColor3 = Color3.fromRGB(22, 25, 34)
+						kbtn.BorderSizePixel = 0
+						kbtn.Font = Enum.Font.GothamSemibold
+						kbtn.TextSize = 11
+						kbtn.TextColor3 = THEME.Accent
+						kbtn.Text = "[" .. short_key_name(cur_key) .. "]"
+						kbtn.AutoButtonColor = true
+						kbtn.Parent = row
+						corner(kbtn, 4)
+						stroke(kbtn, THEME.Stroke, 1, 0.4)
+
+						local listening = false
+						kbtn.MouseButton1Click:Connect(function()
+							listening = true
+							Library._binding_key = true
+							kbtn.Text = "[ ... ]"
+						end)
+
+						track_conn(uis.InputBegan:Connect(function(inp)
+							if not listening then return end
+							if inp.UserInputType == Enum.UserInputType.Keyboard and inp.KeyCode ~= Enum.KeyCode.Unknown then
+								listening = false
+								task.defer(function() Library._binding_key = false end)
+								cur_key = tostring(inp.KeyCode)
+								flag_tbl.Key = cur_key
+								kbtn.Text = "[" .. short_key_name(cur_key) .. "]"
+								if kbopts.Callback then pcall(kbopts.Callback, inp.KeyCode) end
+							end
+						end))
+						return lobj
+					end
+					return lobj
+				end
+
+				function sec:Button(bopts)
+					bopts = bopts or {}
+					sec._order += 1
+					local btn = Instance.new("TextButton")
+					btn.LayoutOrder = sec._order
+					btn.Size = UDim2.new(1, 0, 0, 28)
+					btn.BackgroundColor3 = bopts.Danger and THEME.Danger or THEME.Item
+					btn.BorderSizePixel = 0
+					btn.Font = Enum.Font.GothamSemibold
+					btn.TextSize = 12
+					btn.TextColor3 = THEME.Text
+					btn.Text = bopts.Name or "Button"
+					btn.AutoButtonColor = true
+					btn.Parent = sframe
+					corner(btn, 6)
+					btn.MouseButton1Click:Connect(function()
+						if bopts.Callback then pcall(bopts.Callback) end
+					end)
+					return btn
+				end
+
+				return sec
+			end
+
+			return pg
+		end
+
+		return win
+	end
+
+	function Library:CreateSettingsPage(win)
+		local sp = win:Page({ Name = "Settings", Columns = 2 })
+		local ui_sec = sp:Section({ Name = "UI Settings", Side = 1 })
+		ui_sec:Label("menu keybind"):Keybind({
+			Name = "Menu Keybind",
+			Flag = "Menu Keybind",
+			Default = Enum.KeyCode.LeftControl,
+			Mode = "Toggle",
+			Callback = function(kc)
+				if Library.SetFlags["Menu Keybind"] then
+					Library.SetFlags["Menu Keybind"](kc)
+				end
+			end,
+		})
+		ui_sec:Toggle({
+			Name = "show keybinds overlay",
+			Flag = "ui_show_kbl",
+			Default = true,
+			Callback = function(v)
+				if kbl_gui then kbl_gui.Enabled = v end
+			end,
+		})
+		ui_sec:Button({
+			Name = "hide menu (LeftCtrl to reopen)",
+			Callback = function()
+				if win._main then win._main.Visible = false end
+			end,
+		})
+		local sys_sec = sp:Section({ Name = "Script Control", Side = 2 })
+		sys_sec:Button({
+			Name = "unload cover hub",
+			Danger = true,
+			Callback = function()
+				if gg.__coverhub_unload then pcall(gg.__coverhub_unload) end
+			end,
+		})
+		return sp
+	end
+
+	function Library:Unload()
+		for _, c in ipairs(Library._conns) do
+			pcall(function() c:Disconnect() end)
+		end
+		Library._conns = {}
+		if Library._gui then
+			pcall(function() Library._gui:Destroy() end)
+			Library._gui = nil
+		end
+	end
+end
+local Window = Library:Window({
+	Name = "Cover Hub",
+	SubTitle = "Essential",
+	TimeRemaining = "lifetime",
+})
+local AimPage = Window:Page({ Name = "Combat", Icon = "131145598162617", Columns = 2 })
+local EspPage = Window:Page({ Name = "Player ESP", Icon = "131145598162617", Columns = 2 })
+local AutoPage = Window:Page({ Name = "Automation", Icon = "131145598162617", Columns = 2 })
+local RecolorPage = Window:Page({ Name = "Visuals", Icon = "131145598162617", Columns = 2 })
+local SettingsPage = Library:CreateSettingsPage(Window)
+Library.MenuKeybind = tostring(Enum.KeyCode.LeftControl)
+pcall(function()
+	if Library.SetFlags and type(Library.SetFlags["Menu Keybind"]) == "function" then
+		Library.SetFlags["Menu Keybind"](Enum.KeyCode.LeftControl)
+	end
+end)
+local AimSection = AimPage:Section({ Name = "Aim Assist", Icon = "131145598162617", Side = 1 })
+AimSection:Toggle({
+	Name = "enabled",
+	Flag = "aim_enabled",
+	Default = false,
+	Callback = function(v) aim.Enabled = v end,
+})
+AimSection:Toggle({
+	Name = "ignore friends",
+	Flag = "aim_ignore_friends",
+	Default = false,
+	Callback = function(v) aim.IgnoreFriends = v end,
+})
+AimSection:Toggle({
+	Name = "visualizer",
+	Flag = "aim_indicator_enabled",
+	Default = false,
+	Callback = function(v) aim.IndicatorEnabled = v end,
+}):Colorpicker({
+	Name = "visualizer_color",
+	Flag = "aim_indicator_color",
+	Default = Color3.fromRGB(40, 40, 181),
+	Callback = function(v) aim.IndicatorColor = v end,
+})
+local function current_player_names()
+	local out = {}
+	for _, p in ipairs(plrs:GetPlayers()) do
+		if p ~= lp then table.insert(out, p.Name) end
+	end
+	table.sort(out)
+	return out
+end
+local WLDropdown = AimSection:Dropdown({
+	Name = "whitelist",
+	Flag = "aim_whitelist",
+	Default = {},
+	Items = current_player_names(),
+	Multi = true,
+	MaxSize = 180,
+	Callback = function(v)
+		aim.Whitelist = {}
+		if type(v) == "table" then
+			for _, name in ipairs(v) do
+				if type(name) == "string" then aim.Whitelist[name:lower()] = true end
+			end
+		end
+	end,
+})
+task.spawn(function()
+	local last_names = table.concat(current_player_names(), "\0")
+	plrs.PlayerAdded:Connect(function()
+		task.wait(0.5)
+		local n = current_player_names()
+		local sig = table.concat(n, "\0")
+		if sig ~= last_names then
+			last_names = sig
+			pcall(function()
+				if WLDropdown and WLDropdown.Refresh then WLDropdown:Refresh(n) end
+			end)
+		end
+	end)
+	plrs.PlayerRemoving:Connect(function(p)
+		local n = {}
+		for _, pl in ipairs(plrs:GetPlayers()) do
+			if pl ~= lp and pl ~= p then table.insert(n, pl.Name) end
+		end
+		table.sort(n)
+		local sig = table.concat(n, "\0")
+		if sig ~= last_names then
+			last_names = sig
+			pcall(function()
+				if WLDropdown and WLDropdown.Refresh then WLDropdown:Refresh(n) end
+			end)
+		end
+	end)
+end)
+osp.enabled = false
+osp.cpf = 40
+osp.cps = 340
+osp.method = "normal"
+osp.key = "T"
+osp.range_pad = 2
+osp.skip_projectiles = false
+osp.smart_gates = true
+osp.los_check = true
+osp.skip_if_already_affected = false
+osp.force_normal = {
+	Incendia = true,
+	Sol = true,
+	SiphonBlast = true,
+	Fireball = true,
+	FireBlast = true,
+	Sunbeam = true,
+	IgnisInfernum = true,
+	IgnisTempestas = true,
+	IceShard = true,
+	PsychicBlast = true,
+	ScreamBlast = true,
+	SolarisImpulsus = true,
+	PhasmatosIncendia = true,
+	PhasmatosIncendiaCaerulus = true,
+	SuctusIncendia = true,
+	IncendiasDecipula = true,
+	RockThrow = true,
+}
+gg.__coverhub_osp = osp
+do
+	local toServer = rs:FindFirstChild("Remotes")
+	toServer = toServer and toServer:FindFirstChild("AbilityService")
+	toServer = toServer and toServer:FindFirstChild("ToServer")
+	osp.ActVariants = {}
+	osp.RemActivated5 = nil
+	osp.RemBeginAbility = nil
+	if toServer then
+		for _, c in ipairs(toServer:GetChildren()) do
+			local nm = c.Name
+			if nm:match("^AbilityActivated_*$") then
+				table.insert(osp.ActVariants, c)
+				if nm == "AbilityActivated_____" then osp.RemActivated5 = c end
+			elseif nm == "BeginAbility" then
+				osp.RemBeginAbility = c
+			end
+		end
+	end
+end
+task.spawn(function()
+	local ok, bind = pcall(function()
+		return lp.PlayerScripts:WaitForChild("Bindables"):WaitForChild("Abilities")
+	end)
+	if ok and bind then osp.BindActivated = bind:FindFirstChild("AbilityActivated") end
+end)
+local player_stats_client
+task.spawn(function()
+	for _ = 1, 50 do
+		local ok, m = pcall(function()
+			return require(lp.PlayerScripts.ClientServices.PlayerStatsClient)
+		end)
+		if ok and type(m) == "table" then player_stats_client = m; return end
+		task.wait(0.2)
+	end
+end)
+local OspSection = AimPage:Section({ Name = "Outspammer", Icon = "131145598162617", Side = 2 })
+osp.key_on = false
+OspSection:Toggle({
+	Name = "enabled",
+	Flag = "osp_enabled",
+	Default = false,
+	Callback = function(v)
+		osp.enabled = v
+	end,
+})
+OspSection:Toggle({
+	Name = "skip projectile abilities",
+	Flag = "osp_skip_projectiles",
+	Default = false,
+	Callback = function(v) osp.skip_projectiles = v end,
+})
+OspSection:Toggle({
+	Name = "mini tp (snap behind target per fire)",
+	Flag = "osp_mini_tp",
+	Default = false,
+	Callback = function(v) osp.mini_tp = v end,
+})
+OspSection:Dropdown({
+	Name = "method",
+	Flag = "osp_method",
+	Default = "normal",
+	Items = { "normal", "pingless" },
+	MaxSize = 100,
+	Callback = function(v)
+		if type(v) == "string" then osp.method = v end
+	end,
+})
+local cps_acknowledged = false
+local cps_popup_open = false
+local function show_cps_warning(target_cps, on_confirm, on_cancel)
+	if cps_popup_open then return end
+	cps_popup_open = true
+	local cg = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+	local gui = Instance.new("ScreenGui")
+	gui.Name = rand_gui_name()
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.DisplayOrder = 200
+	pcall(function() gui.Parent = cg end)
+	if not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
+	local box = Instance.new("Frame")
+	box.AnchorPoint = Vector2.new(0.5, 0.5)
+	box.Position = UDim2.fromScale(0.5, 0.5)
+	box.Size = UDim2.fromOffset(340, 170)
+	box.BackgroundColor3 = Color3.fromRGB(42, 44, 52)
+	box.BackgroundTransparency = 0.05
+	box.BorderSizePixel = 0
+	box.Parent = gui
+	local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = box
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(220, 80, 80)
+	stroke.Thickness = 1
+	stroke.Transparency = 0.3
+	stroke.Parent = box
+	local title = Instance.new("TextLabel")
+	title.BackgroundTransparency = 1
+	title.Position = UDim2.fromOffset(16, 12)
+	title.Size = UDim2.new(1, -32, 0, 22)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 15
+	title.TextColor3 = Color3.fromRGB(230, 230, 230)
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Text = "high cps warning"
+	title.Parent = box
+	local body = Instance.new("TextLabel")
+	body.BackgroundTransparency = 1
+	body.Position = UDim2.fromOffset(16, 38)
+	body.Size = UDim2.new(1, -32, 0, 70)
+	body.Font = Enum.Font.Gotham
+	body.TextSize = 12
+	body.TextColor3 = Color3.fromRGB(180, 180, 185)
+	body.TextXAlignment = Enum.TextXAlignment.Left
+	body.TextYAlignment = Enum.TextYAlignment.Top
+	body.TextWrapped = true
+	body.Text = string.format(
+		"you set cps to %d. anything above 350 may trigger server-side rate detection and get you flagged. continue?",
+		math.floor(target_cps))
+	body.Parent = box
+	local function mkbtn(text, color, x)
+		local b = Instance.new("TextButton")
+		b.AnchorPoint = Vector2.new(0, 1)
+		b.Position = UDim2.new(0, x, 1, -14)
+		b.Size = UDim2.fromOffset(140, 32)
+		b.BackgroundColor3 = color
+		b.BorderSizePixel = 0
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 13
+		b.TextColor3 = Color3.fromRGB(240, 240, 240)
+		b.AutoButtonColor = true
+		b.Parent = box
+		local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 6); c.Parent = b
+		return b
+	end
+	local cancel_btn  = mkbtn("cancel",       Color3.fromRGB(64, 66, 74),  16)
+	local confirm_btn = mkbtn("i understand", Color3.fromRGB(170, 50, 50), 184)
+	local function close()
+		cps_popup_open = false
+		pcall(function() gui:Destroy() end)
+	end
+	confirm_btn.MouseButton1Click:Connect(function()
+		cps_acknowledged = true
+		close()
+		if on_confirm then on_confirm() end
+	end)
+	cancel_btn.MouseButton1Click:Connect(function()
+		close()
+		if on_cancel then on_cancel() end
+	end)
+end
+local cps_slider
+cps_slider = OspSection:Slider({
+	Name = "cps",
+	Flag = "osp_cps",
+	Default = 340,
+	Min = 10,
+	Max = 1000,
+	Decimals = 1,
+	Suffix = " cps",
+	Callback = function(v)
+		if v > 350 and not cps_acknowledged then
+			show_cps_warning(v,
+				function() osp.cps = v end,
+				function()
+					osp.cps = 350
+					pcall(function()
+						if cps_slider.SetValue then cps_slider:SetValue(350) end
+					end)
+					pcall(function()
+						if Library and Library.Flags then
+							Library.Flags["osp_cps"] = 350
+						end
+					end)
+				end)
+			return
+		end
+		osp.cps = v
+	end,
+})
+OspSection:Label("keybind"):Keybind({
+	Name = "osp_key",
+	Flag = "osp_key",
+	Default = Enum.KeyCode.R,
+	Mode = "Toggle",
+	Callback = function() end,
+})
+local function osp_bound_key()
+	local f = Library.Flags and Library.Flags["osp_key"]
+	if type(f) == "table" and f.Key then
+		local s = tostring(f.Key)
+		return (s:gsub("Enum%.KeyCode%.", ""):gsub("Enum%.UserInputType%.", ""))
+	end
+	return osp.key or "R"
+end
+local osp_key_conn = uis.InputBegan:Connect(function(input, gpe)
+	if gpe then return end
+	if uis:GetFocusedTextBox() then return end
+	local want = osp_bound_key()
+	local kc = input.KeyCode and input.KeyCode.Name or nil
+	local uit = input.UserInputType and input.UserInputType.Name or nil
+	if kc == want or uit == want then
+		osp.key_on = not osp.key_on
+		osp.enabled = osp.key_on
+	end
+end)
+local osp_once
+local retaliate = { enabled = false, burst_ms = 400, last_fire = 0 }
+task.spawn(function()
+	if not state_replicator or type(state_replicator.onStateCreated) ~= "function" then return end
+	pcall(function()
+		state_replicator.onStateCreated("AbilityPriority", function(player, value)
+			if player ~= lp or type(value) ~= "number" or value <= 0 then return end
+			if not retaliate.enabled then return end
+			if (os.clock() - retaliate.last_fire) < 0.5 then return end
+			local nearest, best_d = nil, math.huge
+			local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+			if not root then return end
+			local name = current_ability_name()
+			for char in pairs(iter_targets()) do
+				if not is_friend(char) and not is_whitelisted(char) then
+					local a = anchor(char)
+					local hum = char:FindFirstChildOfClass("Humanoid")
+					if hum and hum.Health > 0 and a and can_affect(char, name) then
+						local d = (a.Position - root.Position).Magnitude
+						if d < best_d then best_d, nearest = d, char end
+					end
+				end
+			end
+			if not nearest then return end
+			aim.Current = nearest
+			retaliate.last_fire = os.clock()
+			local until_t = os.clock() + retaliate.burst_ms / 1000
+			task.spawn(function()
+				while os.clock() < until_t and retaliate.enabled do
+					pcall(osp_once)
+					task.wait()
+				end
+			end)
+		end)
+	end)
+end)
+OspSection:Toggle({
+	Name = "auto retaliate",
+	Flag = "retaliate",
+	Default = false,
+	Callback = function(v) retaliate.enabled = v end,
+})
+local cs = game:GetService("CollectionService")
+local function attr_true(obj, k)
+	if not obj then return false end
+	local v = obj:GetAttribute(k)
+	return v == true
+end
+local function osp_self_blocked()
+	local char = lp.Character
+	if not char then return true end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum or hum.Health <= 0 then return true end
+	if attr_true(char, "ragdoll") then return true end
+	for _, k in ipairs({ "Sleeping", "Sleep", "Choking", "BeingChoked", "InsanityHexed",
+	                    "DisorientationHexed", "BeingCarried", "InAstralProjection",
+	                    "PendantTrap", "StarlingSwarm", "SnapNeck",
+	                    "Silenced", "MagicShackles", "MAGIC_LOCK" }) do
+		if attr_true(char, k) or attr_true(lp, k) then return true end
+	end
+	return false
+end
+local OSP_SKIP_RAGDOLL = {}
+do
+	local function add(name) OSP_SKIP_RAGDOLL[name] = true end
+	for _, n in ipairs({
+		"Super Punch", "Super Kick", "Super Slap", "Slap", "Punch",
+		"Arm Break", "Leg Break", "Heart Rip", "Snap Neck", "Head Rip",
+		"Throat Rip", "Spine Break", "Choke", "Choke Out", "Blood Choke",
+		"Choke Carry", "Compulsion", "Hindsight", "Mind Invasion",
+		"Head Siphon", "Drink Blood", "Blood Heal", "Eye Gouge",
+		"Flame Punch", "Flare of Life", "Blink Attack",
+	}) do add(n) end
+	for _, n in ipairs({
+		"Maul Attack", "Venom Bite", "Wolf Bite", "Upgraded Bite",
+		"Wolf Grab", "Wolf Ravage", "Wolf Arm Break", "Hybrid Slash",
+		"Hybrid Roar", "Headbutt", "Heavy Shove", "Primal Stun",
+		"Beast Rush", "Piggy Back Attack", "Werewolf Leap",
+	}) do add(n) end
+	for _, n in ipairs({
+		"Blade of Bones", "Blood Blade", "Concealed Stakes",
+		"Combat Combo", "Bone Break Combo", "Coin Toss",
+		"Lifted Throw", "Necksnap Lift", "Dragon Breath",
+		"Drain Blood",
+	}) do add(n) end
+	for _, n in ipairs({
+		"Telekinetic Head Rip", "Telekinetic Submission",
+		"Telekinetic Slam", "Telekinetic Attack",
+	}) do add(n) end
+	for _, n in ipairs({
+		"Osculum Tenebris", "Motus Corporis", "Freya Resurrection",
+	}) do add(n) end
+	for _, n in ipairs({ "Body Jump", "Mass Compulsion", "Psychic Compulsion" }) do add(n) end
+	local keys = {
+		"SuperPunch", "SuperKick", "SuperSlap", "ArmBreak", "LegBreak",
+		"HeartRip", "SnapNeck", "HeadRip", "ThroatRip", "SpineBreak",
+		"ChokeOut", "BloodChoke", "ChokeCarry", "MindInvasion",
+		"HeadSiphon", "DrinkBlood", "BloodHeal", "EyeGouge", "FlamePunch",
+		"FlareOfLife", "BlinkAttack",
+		"MaulAttack", "VenomBite", "WolfBite", "UpgradedBite", "WolfGrab",
+		"WolfRavage", "WolfArmBreak", "HybridSlash", "HybridRoar",
+		"HeavyShove", "PrimalStun", "BeastRush", "PiggyBackAttack",
+		"WerewolfLeap", "BladeOfBones", "BloodBlade", "ConcealedStakes",
+		"CombatCombo", "BoneBreakCombo", "CoinToss", "LiftedThrow",
+		"NecksnapLift", "DragonBreath", "DrainBlood",
+		"TelekineticHeadRip", "TelekineticSubmission", "TelekineticSlam",
+		"TelekineticAttack", "OsculumTenebris", "MotusCorporis",
+		"FreyaResurrection", "BodyJump", "MassCompulsion", "PsychicCompulsion",
+	}
+	for _, k in ipairs(keys) do add(k) end
+end
+local OSP_CC_MAP = {
+	Immobilus          = { "Immobilized", "ImmobilusActive", "Frozen" },
+	ImmobilizingChains = { "Immobilized", "ChainedUp" },
+	Sol                = { "Blinded", "SolBlinded" },
+	Silencio           = { "Silenced" },
+	InsanityHex        = { "InsanityHexed" },
+	DisorientationHex  = { "DisorientationHexed" },
+	Choke              = { "BeingChoked", "Choking" },
+	ChokeOut           = { "BeingChoked", "Choking" },
+	BloodChoke         = { "BeingChoked", "Choking" },
+	ChokeCarry         = { "BeingCarried", "BeingChoked" },
+	Siphon             = { "Siphoned", "BeingSiphoned" },
+	SiphonBlast        = { "Siphoned" },
+	HeadSiphon         = { "BeingSiphoned", "Siphoned" },
+	AdSomnum           = { "Sleeping", "Sleep" },
+	HeartRip           = { "BeingHeartRipped" },
+	SnapNeck           = { "BeingSnapNecked" },
+	HeadRip            = { "BeingHeadRipped" },
+	ThroatRip          = { "BeingThroatRipped" },
+	Compulsion         = { "Compelled", "BeingCompelled" },
+	BodyJump           = { "BodyJumped" },
+	WolfVenom          = { "WolfVenomed" },
+	UpgradedVenom      = { "UpgradedVenomed", "WolfVenomed" },
+}
+local function osp_target_already_affected(name, char)
+	if not (char and name) then return false end
+	local keys = OSP_CC_MAP[name]
+	if not keys then return false end
+	for _, k in ipairs(keys) do
+		if attr_true(char, k) then return true end
+		local ok_tag, has = pcall(function() return cs:HasTag(char, k) end)
+		if ok_tag and has == true then return true end
+	end
+	return false
+end
+local function osp_target_protected(char)
+	if not char then return true end
+	if attr_true(char, "GodMode") or attr_true(char, "ProtectionMode") then return true end
+	local p = plrs:GetPlayerFromCharacter(char)
+	if p and (attr_true(p, "GodMode") or attr_true(p, "ProtectionMode")) then return true end
+	if attr_true(char, "InPendantTrap") or attr_true(char, "PendantTrap") then return true end
+	if attr_true(char, "InAstralProjection") then return true end
+	return false
+end
+local function osp_los_clear(char)
+	local me = lp.Character
+	if not me then return true end
+	local my_pts = {}
+	for _, n in ipairs({ "Head", "UpperTorso", "HumanoidRootPart" }) do
+		local p = me:FindFirstChild(n)
+		if p and p:IsA("BasePart") then my_pts[#my_pts + 1] = p.Position end
+	end
+	local tgt_pts = {}
+	for _, n in ipairs({ "Head", "UpperTorso", "HumanoidRootPart" }) do
+		local p = char:FindFirstChild(n)
+		if p and p:IsA("BasePart") then tgt_pts[#tgt_pts + 1] = p.Position end
+	end
+	if #my_pts == 0 or #tgt_pts == 0 then return true end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { me, char }
+	params.IgnoreWater = true
+	params.RespectCanCollide = false
+	for _, origin in ipairs(my_pts) do
+		for _, dest in ipairs(tgt_pts) do
+			local dir = dest - origin
+			if dir.Magnitude < 2 then return true end
+			local ok, result = pcall(workspace.Raycast, workspace, origin, dir, params)
+			if ok then
+				if not result then return true end
+				if result.Instance and result.Instance:IsDescendantOf(char) then return true end
+				local mat = result.Material
+				if mat == Enum.Material.Grass or mat == Enum.Material.LeafyGrass
+				   or mat == Enum.Material.Water or mat == Enum.Material.Glass then
+					return true
+				end
+				local inst = result.Instance
+				if inst and (inst.Transparency and inst.Transparency > 0.5) then
+					return true
+				end
+				if inst and (not inst.CanCollide) then return true end
+			end
+		end
+	end
+	return false
+end
+local function ability_accepts(h, char)
+	if type(h) ~= "table" or not char then return nil end
+	local ts = rawget(h, "_targetSystem")
+	local kind = ts and rawget(ts, "TargetType")
+	if kind == target_type_enum.AreaCheck or kind == target_type_enum.CylinderCast then
+		return nil
+	end
+	local hdm = rawget(h, "hitDetectionMobile")
+	if type(hdm) ~= "function" then
+		local mt = getmetatable(h)
+		local idx = type(mt) == "table" and mt.__index
+		if type(idx) == "table" then hdm = rawget(idx, "hitDetectionMobile") end
+	end
+	if type(hdm) ~= "function" then return nil end
+	local ok, res = pcall(hdm, h, char)
+	if ok and res == char then return true end
+	return false
+end
+local function osp_target_char()
+	local char = aim.Current
+	if not (char and char.Parent) then return nil end
+	if is_friend(char) or is_whitelisted(char) then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	local a = anchor(char)
+	if not (hum and hum.Health > 0 and a) then return nil end
+	local root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	if not root then return nil end
+	local name = current_ability_name()
+	local d_cur = name and ability_data[name]
+	local range = effective_range(name) + (osp.range_pad or 2)
+	if (a.Position - root.Position).Magnitude > range then return nil end
+	if not osp_can_affect(char, name, d_cur) then return nil end
+	if name and BEHIND_ONLY[name] and not is_behind_target(char) then return nil end
+	if osp.smart_gates then
+		if osp_target_protected(char) then return nil end
+		if name and OSP_SKIP_RAGDOLL[name] and not osp.force_normal[name]
+		   and attr_true(char, "ragdoll") then return nil end
+		if osp.skip_if_already_affected and osp_target_already_affected(name, char) then return nil end
+		if osp.los_check and not osp.force_normal[name] and not osp_los_clear(char) then return nil end
+	end
+	return char
+end
+local function osp_can_activate(h, d)
+	if real_can_activate then
+		local ok, can = pcall(real_can_activate, h._name)
+		if ok then return can == true end
+	end
+	if not d then return true end
+	local st, sc = d.statType, d.statCost
+	if st and sc and sc > 0 then
+		if not player_stats_client then return true end
+		local fn = player_stats_client.getStat
+		if type(fn) ~= "function" then return true end
+		local ok, cur = pcall(fn, st)
+		if not ok or type(cur) ~= "number" then return true end
+		if cur < sc then return false end
+	end
+	if lp:GetAttribute("MagicShackles") and d and tostring(d.statType) == "Magic" then return false end
+	if lp:GetAttribute("MAGIC_LOCK") and d and tostring(d.statType) == "Magic" then return false end
+	return true
+end
+function osp.fire_normal(h)
+	rawset(h, "_isHolding", true)
+	pcall(function() h:activated() end)
+end
+local http_svc = game:GetService("HttpService")
+function osp.fire_pingless(h)
+	local rem = osp.RemActivated5
+	if not rem then return end
+	local name = rawget(h, "_name")
+	if type(name) ~= "string" then return end
+	local ts = rawget(h, "_targetSystem")
+	if not ts then return end
+	local gti = ts.GetTargetInfo
+	if type(gti) ~= "function" then return end
+	local ok, info = pcall(gti, ts)
+	if not ok or info == nil then return end
+	local info_t = typeof(info)
+	if info_t == "table" and next(info) == nil then return end
+	local timeout = rawget(h, "_timeout")
+	if type(timeout) == "number" and not client_debounce.isAlive(name) then
+		pcall(client_debounce.set, name, timeout)
+	end
+	if info_t == "Vector3" then
+		pcall(rem.FireServer, rem, info, http_svc:GenerateGUID(false))
+	else
+		pcall(rem.FireServer, rem, info)
+	end
+	local bind = osp.BindActivated
+	if bind then pcall(bind.Fire, bind, name) end
+end
+function osp_once()
+	local h = rawget(ability_hdl, "activeAbility")
+	if type(h) ~= "table" or type(rawget(h, "_name")) ~= "string" then return end
+	local n = h._name
+	if AIM_EXCLUDED[n] then return end
+	local d = ability_data[n]
+	if osp.smart_gates and osp_self_blocked() then return end
+	local will_fire_normal = osp.method ~= "pingless" or osp.force_normal[n]
+	if will_fire_normal and client_debounce.isAlive(n) then return end
+	if osp.skip_projectiles and osp.force_normal[n] then return end
+	if not osp_can_activate(h, d) then return end
+	local tgt = osp_target_char()
+	if not tgt then return end
+	local ts = rawget(h, "_targetSystem")
+	if ts then
+		local kind = rawget(ts, "TargetType")
+		if kind == target_type_enum.AreaCheck or kind == target_type_enum.CylinderCast then
+			local vts = rawget(ts, "ValidTargets")
+			if type(vts) == "table" then vts[tgt] = true end
+		elseif kind == target_type_enum.CastResult then
+			local a = anchor(tgt)
+			if a then rawset(ts, "ValidTargetPoint", a.Position) end
+		else
+			rawset(ts, "ValidTarget", tgt)
+		end
+		local has = rawget(ts, "ValidTarget") or rawget(ts, "ValidTargetPoint")
+		if not has then
+			local vts = rawget(ts, "ValidTargets")
+			if type(vts) == "table" and next(vts) then has = true end
+		end
+		if not has then return end
+	end
+	local tp_root, tp_orig_cf
+	if osp.mini_tp and tgt and not osp.force_normal[n] then
+		local my_root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		local their_root = tgt:FindFirstChild("HumanoidRootPart")
+		                or (tgt:IsA("Model") and tgt.PrimaryPart)
+		if my_root and their_root then
+			tp_orig_cf = my_root.CFrame
+			tp_root = my_root
+			my_root.CFrame = their_root.CFrame * CFrame.new(0, 0, 3)
+		end
+	end
+	local face_root, face_orig_cf
+	if osp.force_normal[n] and tgt then
+		local my_root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+		local a = anchor(tgt)
+		if my_root and a then
+			local flat_target = Vector3.new(a.Position.X, my_root.Position.Y, a.Position.Z)
+			if (flat_target - my_root.Position).Magnitude > 0.01 then
+				face_orig_cf = my_root.CFrame
+				face_root = my_root
+				my_root.CFrame = CFrame.lookAt(my_root.Position, flat_target)
+			end
+		end
+	end
+	if osp.method == "pingless" and not osp.force_normal[n] then
+		osp.fire_pingless(h)
+	else
+		osp.fire_normal(h)
+		if d and d.holding then
+			task.wait()
+			rawset(h, "_isHolding", false)
+			pcall(function() h:deactivate() end)
+		end
+	end
+	if face_root and face_orig_cf then
+		face_root.CFrame = face_orig_cf
+	end
+	if tp_root and tp_orig_cf then
+		tp_root.CFrame = tp_orig_cf
+	end
+end
+local osp_last_t = 0
+local osp_conn = rsvc.Heartbeat:Connect(function()
+	if not osp.enabled then return end
+	local cps = osp.cps or 120
+	local interval = 1 / cps
+	local now = os.clock()
+	if osp_last_t == 0 or (now - osp_last_t) > 1 then
+		osp_last_t = now - interval
+	end
+	local max_per_tick = math.max(1, math.ceil(cps / 30))
+	local fires = 0
+	while (now - osp_last_t) >= interval and fires < max_per_tick do
+		pcall(osp_once)
+		osp_last_t = osp_last_t + interval
+		fires = fires + 1
+	end
+end)
+local KBL_ENTRIES = {}
+local kbl_gui, kbl_frame, kbl_layout
+local function kbl_build()
+	local cg = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+	kbl_gui = Instance.new("ScreenGui")
+	kbl_gui.Name = rand_gui_name()
+	kbl_gui.ResetOnSpawn = false
+	kbl_gui.IgnoreGuiInset = true
+	kbl_gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	kbl_gui.DisplayOrder = 100
+	pcall(function() kbl_gui.Parent = cg end)
+	kbl_frame = Instance.new("Frame")
+	kbl_frame.Name = "list"
+	kbl_frame.AnchorPoint = Vector2.new(0, 0.5)
+	kbl_frame.Position = UDim2.new(0, 14, 0.5, 0)
+	kbl_frame.Size = UDim2.fromOffset(160, 10)
+	kbl_frame.BackgroundColor3 = Color3.fromRGB(18, 20, 24)
+	kbl_frame.BackgroundTransparency = 0.1
+	kbl_frame.BorderSizePixel = 0
+	kbl_frame.AutomaticSize = Enum.AutomaticSize.Y
+	kbl_frame.Parent = kbl_gui
+	local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 6); corner.Parent = kbl_frame
+	local stroke = Instance.new("UIStroke"); stroke.Color = Color3.fromRGB(60, 60, 68); stroke.Thickness = 1; stroke.Transparency = 0.5; stroke.Parent = kbl_frame
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 6); pad.PaddingBottom = UDim.new(0, 6)
+	pad.PaddingLeft = UDim.new(0, 8); pad.PaddingRight = UDim.new(0, 8)
+	pad.Parent = kbl_frame
+	kbl_layout = Instance.new("UIListLayout")
+	kbl_layout.FillDirection = Enum.FillDirection.Vertical
+	kbl_layout.Padding = UDim.new(0, 2)
+	kbl_layout.SortOrder = Enum.SortOrder.LayoutOrder
+	kbl_layout.Parent = kbl_frame
+	local title = Instance.new("TextLabel")
+	title.Name = "title"
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, 0, 0, 14)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 11
+	title.TextColor3 = Color3.fromRGB(220, 220, 220)
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Text = "KEYBINDS"
+	title.LayoutOrder = 0
+	title.Parent = kbl_frame
+	do
+		local dragging, drag_start, start_pos
+		kbl_frame.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+			   or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				drag_start = input.Position
+				start_pos = kbl_frame.Position
+			end
+		end)
+		kbl_frame.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+			   or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end)
+		uis.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			   or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - drag_start
+				kbl_frame.Position = UDim2.new(
+					start_pos.X.Scale, start_pos.X.Offset + delta.X,
+					start_pos.Y.Scale, start_pos.Y.Offset + delta.Y)
+			end
+		end)
+	end
+end
+local function kbl_add(label, key_fn, state_fn)
+	local row = Instance.new("TextLabel")
+	row.BackgroundTransparency = 1
+	row.Size = UDim2.new(1, 0, 0, 16)
+	row.Font = Enum.Font.Gotham
+	row.TextSize = 12
+	row.TextColor3 = Color3.fromRGB(170, 170, 170)
+	row.TextXAlignment = Enum.TextXAlignment.Left
+	row.LayoutOrder = #KBL_ENTRIES + 1
+	row.Text = label
+	row.Parent = kbl_frame
+	table.insert(KBL_ENTRIES, { row = row, label = label, key_fn = key_fn, state_fn = state_fn })
+end
+kbl_build()
+kbl_add("Spammer", function()
+	local f = Library.Flags and Library.Flags["osp_key"]
+	if type(f) == "table" and f.Key then
+		return (f.Key:gsub("Enum%.KeyCode%.", ""):gsub("Enum%.UserInputType%.", ""))
+	end
+	return osp.key
+end, function() return osp.key_on end)
+local kbl_acc = 0
+local kbl_conn = rsvc.Heartbeat:Connect(function(dt)
+	kbl_acc = kbl_acc + dt
+	if kbl_acc < 0.2 then return end
+	kbl_acc = 0
+	for _, e in ipairs(KBL_ENTRIES) do
+		local key_text = tostring(e.key_fn() or "?")
+		local on = e.state_fn()
+		e.row.Text = string.format("%s  [%s]", e.label, key_text)
+		e.row.TextColor3 = on and Color3.fromRGB(60, 220, 120) or Color3.fromRGB(170, 170, 170)
+	end
+end)
+local aim_acc = 0
+local AIM_PERIOD = 1 / 30
+local aim_conn = rsvc.Heartbeat:Connect(function(dt)
+	if not (aim.Enabled or osp.enabled or osp.key_on) then
+		if aim.Current ~= nil then aim.Current = nil end
+		return
+	end
+	aim_acc = aim_acc + dt
+	if aim_acc < AIM_PERIOD then return end
+	aim_acc = 0
+	aim.Current = pick_target()
+end)
+local indicator_gui = Instance.new("ScreenGui")
+indicator_gui.Name = rand_gui_name()
+indicator_gui.ResetOnSpawn = false
+indicator_gui.IgnoreGuiInset = true
+indicator_gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+indicator_gui.DisplayOrder = 65
+do
+	local cg = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+	local ok = pcall(function() indicator_gui.Parent = cg end)
+	if not ok or not indicator_gui.Parent then indicator_gui.Parent = lp:WaitForChild("PlayerGui") end
+end
+local indicator_dot = Instance.new("Frame")
+indicator_dot.Name = "IndicatorDot"
+indicator_dot.AnchorPoint = Vector2.new(0.5, 0.5)
+indicator_dot.Size = UDim2.fromOffset(10, 10)
+indicator_dot.BackgroundColor3 = aim.IndicatorColor
+indicator_dot.BorderSizePixel = 0
+indicator_dot.Visible = false
+indicator_dot.Parent = indicator_gui
+local indicator_corner = Instance.new("UICorner")
+indicator_corner.CornerRadius = UDim.new(1, 0)
+indicator_corner.Parent = indicator_dot
+local indicator_conn = rsvc.RenderStepped:Connect(function()
+	indicator_dot.BackgroundColor3 = aim.IndicatorColor
+	if not (aim.IndicatorEnabled and aim.Current and aim.Current.Parent) then
+		indicator_dot.Visible = false
+		return
+	end
+	local a = anchor(aim.Current)
+	if not a then
+		indicator_dot.Visible = false
+		return
+	end
+	local sp, on = cam:WorldToViewportPoint(a.Position)
+	if not on or sp.Z <= 0 then
+		indicator_dot.Visible = false
+		return
+	end
+	indicator_dot.Position = UDim2.fromOffset(sp.X, sp.Y)
+	indicator_dot.Visible = true
+end)
+local esp = {
+	Enabled         = false,
+	ShowSlotName    = false,
+	ShowSpecie      = false,
+	ShowDisplayName = false,
+	ShowUsername    = false,
+	ShowHealth      = false,
+	ShowDistance    = false,
+	ShowVisibility  = false,
+	ColorFriends    = false,
+	FriendsColor    = Color3.fromRGB(0, 200, 255),
+	TextSize        = 13,
+	DistanceLimit   = 2000,
+	YOffset         = 0,
+}
+
+do
+	local Left  = EspPage:Section({ Name = "Player ESP", Icon = "131145598162617", Side = 1 })
+	local Right = EspPage:Section({ Name = "ESP Settings", Icon = "131145598162617", Side = 2 })
+	local function tog(sec, name, flag, key, default)
+		sec:Toggle({ Name = name, Flag = flag, Default = default or false,
+			Callback = function(v) esp[key] = v end })
+	end
+	tog(Left, "enabled",          "esp_enabled",      "Enabled",         false)
+	tog(Left, "slot name",        "esp_slot",         "ShowSlotName",    false)
+	tog(Left, "specie",           "esp_specie",       "ShowSpecie",      false)
+	tog(Left, "display name",     "esp_display",      "ShowDisplayName", false)
+	tog(Left, "username",         "esp_username",     "ShowUsername",    false)
+	tog(Left, "health %",         "esp_health",       "ShowHealth",      false)
+	tog(Left, "distance",         "esp_distance",     "ShowDistance",    false)
+	tog(Left, "visible / invisible", "esp_visibility", "ShowVisibility", false)
+	Left:Toggle({
+		Name = "friends color",
+		Flag = "esp_friends",
+		Default = false,
+		Callback = function(v) esp.ColorFriends = v end,
+	}):Colorpicker({
+		Name = "esp_friends_color",
+		Flag = "esp_friends_color",
+		Default = Color3.fromRGB(0, 200, 255),
+		Callback = function(v) esp.FriendsColor = v end,
+	})
+	Right:Slider({ Name = "text size", Flag = "esp_size", Default = 13, Min = 9, Max = 28,
+		Decimals = 1, Callback = function(v) esp.TextSize = v end })
+	Right:Slider({ Name = "max distance", Flag = "esp_dist", Default = 2000, Min = 100, Max = 5000,
+		Decimals = 1, Suffix = " studs", Callback = function(v) esp.DistanceLimit = v end })
+	Right:Slider({ Name = "y offset", Flag = "esp_yoff", Default = 0, Min = -100, Max = 100,
+		Decimals = 1, Suffix = " px", Callback = function(v) esp.YOffset = v end })
+end
+local function esp_real_health(player, hum)
+	if player then
+		local tf = workspace:FindFirstChild("PlayerNameTagFolder")
+		local tag = tf and tf:FindFirstChild(tostring(player.UserId))
+		local bar = tag and tag:FindFirstChild("Health")
+		bar = bar and bar:FindFirstChild("Bar")
+		bar = bar and bar:FindFirstChild("Progress")
+		if bar and bar:IsA("GuiBase2d") then
+			local frac = bar.Size.X.Scale
+			if type(frac) == "number" and frac >= 0 and frac <= 1 then
+				return math.floor(frac * 100 + 0.5)
+			end
+		end
+	end
+	if hum then return math.floor(hum.Health) end
+	return 0
+end
+
+local function esp_color(specie, slot)
+	local slotlowered = (type(slot) == "string") and slot:lower() or ""
+	if slotlowered == "esther mikaelson" or slotlowered:find("esther") then return Color3.fromRGB(51, 122, 115) end
+	if slotlowered == "qetsiyah" then return Color3.fromRGB(57, 143, 208) end
+	if slotlowered == "hope mikaelson" or slotlowered:find("hope") then return Color3.fromRGB(67, 69, 207) end
+	if slotlowered == "josie" or slotlowered:find("josie") then return Color3.fromRGB(98, 12, 172) end
+	if slotlowered == "cleo swande" or slotlowered:find("cleo") then return Color3.fromRGB(255, 198, 86) end
+	if slotlowered == "freya mikaelson" or slotlowered:find("freya") then return Color3.fromRGB(53, 96, 179) end
+	if slotlowered == "bonnie benentt" or slotlowered:find("bonnie") then return Color3.fromRGB(119, 72, 133) end
+	if slotlowered == "klaus mikaelson" or slotlowered:find("klaus") then return Color3.fromRGB(241, 207, 98) end
+
+	local s = (type(specie) == "string") and specie:lower() or ""
+	if s:find("heretic") then return Color3.fromRGB(221, 125, 199) end
+	if s:find("original") or s:find("original vampire") then return Color3.fromRGB(166, 20, 29) end
+	if s:find("witch") and not s:find("werewitch") then return Color3.fromRGB(190, 151, 189) end
+	if s:find("werewitch") then return Color3.fromRGB(199, 79, 144) end
+	if s:find("immortal") then return Color3.fromRGB(131, 68, 217) end
+	if s:find("hybrid") then return Color3.fromRGB(229, 189, 129) end
+	if s:find("vampire") then return Color3.fromRGB(202, 45, 55) end
+
+	return Color3.fromRGB(255, 215, 0)
+end
+
+local function esp_is_spawned(char)
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+	local tped = char:GetAttribute("IsTeleported")
+	if tped ~= nil and tped ~= false then return false end
+	return true
+end
+local function esp_is_invisible(char)
+	local ut = char:FindFirstChild("UpperTorso")
+	return ut ~= nil and ut.LocalTransparencyModifier >= 0.99
+end
+local function hex(c)
+	return string.format("#%02x%02x%02x", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+local esp_gui = Instance.new("ScreenGui")
+esp_gui.Name = rand_gui_name()
+esp_gui.ResetOnSpawn = false
+esp_gui.IgnoreGuiInset = true
+esp_gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+esp_gui.DisplayOrder = 50
+do
+	local cg = cloneref and cloneref(game:GetService("CoreGui")) or game:GetService("CoreGui")
+	local ok = pcall(function() esp_gui.Parent = cg end)
+	if not ok or not esp_gui.Parent then esp_gui.Parent = lp:WaitForChild("PlayerGui") end
+end
+local esp_objs = {}
+local function esp_row(parent, order, rich)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.AutomaticSize = Enum.AutomaticSize.XY
+	l.Size = UDim2.fromOffset(0, 0)
+	l.Font = Enum.Font.SourceSans
+	l.RichText = rich or false
+	l.TextColor3 = Color3.new(1, 1, 1)
+	l.TextStrokeColor3 = Color3.new(0, 0, 0)
+	l.TextStrokeTransparency = 0.25
+	l.LayoutOrder = order
+	l.Visible = false
+	l.Parent = parent
+	return l
+end
+local function esp_make(p)
+	if esp_objs[p] then return esp_objs[p] end
+	local box = Instance.new("Frame")
+	box.Name = p.Name
+	box.BackgroundTransparency = 1
+	box.AnchorPoint = Vector2.new(0.5, 1)
+	box.AutomaticSize = Enum.AutomaticSize.XY
+	box.Size = UDim2.fromOffset(0, 0)
+	box.Visible = false
+	box.Parent = esp_gui
+	local lay = Instance.new("UIListLayout")
+	lay.FillDirection = Enum.FillDirection.Vertical
+	lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	lay.SortOrder = Enum.SortOrder.LayoutOrder
+	lay.Parent = box
+	local o = { box = box, r1 = esp_row(box, 1), r2 = esp_row(box, 2), r3 = esp_row(box, 3, true) }
+	esp_objs[p] = o
+	return o
+end
+local function esp_remove(p)
+	local o = esp_objs[p]
+	if not o then return end
+	pcall(function() o.box:Destroy() end)
+	esp_objs[p] = nil
+end
+local function esp_update()
+	if not esp.Enabled then
+		for _, o in pairs(esp_objs) do o.box.Visible = false end
+		return
+	end
+	local camera = workspace.CurrentCamera
+	local my_root = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+	local alive = {}
+	for _, p in ipairs(plrs:GetPlayers()) do if p ~= lp then alive[p] = true end end
+	for p in pairs(esp_objs) do if not alive[p] then esp_remove(p) end end
+	for p in pairs(alive) do
+		local o = esp_objs[p] or esp_make(p)
+		local char = p.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		local hum  = char and char:FindFirstChildOfClass("Humanoid")
+		if not (char and esp_is_spawned(char) and root and hum and hum.Health > 0) then
+			o.box.Visible = false
+		else
+			local sp, on = camera:WorldToViewportPoint(root.Position + Vector3.new(0, 1.5, 0))
+			local dist = my_root and (root.Position - my_root.Position).Magnitude or 0
+			if not on or sp.Z <= 0 or dist > esp.DistanceLimit then
+				o.box.Visible = false
+			else
+				local slot   = p:GetAttribute("CharacterName") or char:GetAttribute("CharacterName") or ""
+				local specie = char:GetAttribute("SpecieType") or ""
+				local color  = esp_color(specie, slot)
+				local invis  = esp_is_invisible(char)
+				local sz     = esp.TextSize
+				local t1 = {}
+				if esp.ShowSlotName and slot ~= "" then t1[#t1 + 1] = slot end
+				if esp.ShowSpecie and specie ~= "" then t1[#t1 + 1] = "(" .. specie .. ")" end
+				local s1 = table.concat(t1, " ")
+				local t2 = {}
+				if esp.ShowDisplayName and p.DisplayName ~= "" then t2[#t2 + 1] = p.DisplayName end
+				if esp.ShowUsername and p.Name ~= "" then t2[#t2 + 1] = "(@" .. p.Name .. ")" end
+				local s2 = table.concat(t2, " ")
+				local t3 = {}
+				if esp.ShowHealth then t3[#t3 + 1] = esp_real_health(p, hum) .. "%" end
+				if esp.ShowDistance then t3[#t3 + 1] = ('<font color="rgb(231,218,217)">[%d m]</font>'):format(math.floor(dist)) end
+				local s3 = table.concat(t3, " ")
+				if esp.ShowVisibility then
+					local vc = invis and Color3.fromRGB(240, 146, 139) or Color3.fromRGB(136, 234, 141)
+					s3 = s3 .. (s3 ~= "" and "  " or "") ..
+						('<font color="%s">%s</font>'):format(hex(vc), invis and "Invisible" or "Visible")
+				end
+				local isfr = esp.ColorFriends and friends.ids[p.UserId] == true
+				o.r1.Text, o.r1.TextColor3, o.r1.TextSize, o.r1.Visible = s1, color, sz, s1 ~= ""
+				o.r2.Text, o.r2.TextSize, o.r2.Visible = s2, sz, s2 ~= ""
+				o.r2.TextColor3 = isfr and esp.FriendsColor or Color3.fromRGB(200, 200, 200)
+				o.r3.Text, o.r3.TextSize, o.r3.Visible = s3, sz, s3 ~= ""
+				o.box.Position = UDim2.fromOffset(sp.X, sp.Y - 6 + esp.YOffset)
+				o.box.Visible = (s1 ~= "" or s2 ~= "" or s3 ~= "")
+			end
+		end
+	end
+end
+local esp_conn = rsvc.RenderStepped:Connect(function()
+	local ok, err = pcall(esp_update)
+	if not ok and DEBUG then warn("[coverhub esp]", err) end
+end)
+local esp_rm_conn = plrs.PlayerRemoving:Connect(esp_remove)
+local function esp_unload()
+	if esp_conn then esp_conn:Disconnect() end
+	if esp_rm_conn then esp_rm_conn:Disconnect() end
+	pcall(function() esp_gui:Destroy() end)
+	esp_objs = {}
+end
+local auto_unload
+do
+	local r_gg, r_di = getgc, debug.info
+	local auto_state = {
+		mode             = "legit",
+		HeadSiphon       = false,
+		BodyJumpClash    = false,
+		FightBack        = false,
+		NoScreenFX       = false,
+		NoHexFX          = false,
+		EscapeCarry      = false,
+		BreakInsanityHex = false,
+		EscapeStarling   = false,
+		ExitPendantTrap  = false,
+	}
+	local restore = {}
+	conns   = {}
+	local function remote(path)
+		local cur = rs
+		for part in path:gmatch("[^/]+") do
+			cur = cur and cur:FindFirstChild(part)
+		end
+		return cur
+	end
+	do
+		local ICON = "131145598162617"
+		local Clash   = AutoPage:Section({ Name = "Auto Clash",  Icon = ICON, Side = 1 })
+		local Escapes = AutoPage:Section({ Name = "Escapes",     Icon = ICON, Side = 1 })
+		local Fx      = AutoPage:Section({ Name = "Effects",     Icon = ICON, Side = 2 })
+		local function atog(sec, name, flag, key)
+			sec:Toggle({ Name = name, Flag = flag, Default = false,
+				Callback = function(v) auto_state[key] = v end })
+		end
+		atog(Clash,   "auto head siphon",            "auto_siphon",   "HeadSiphon")
+		atog(Clash,   "auto body jump",              "auto_clash",    "BodyJumpClash")
+		atog(Clash,   "auto fight back",             "auto_fight",    "FightBack")
+		Clash:Dropdown({
+			Name = "mode",
+			Flag = "auto_mode",
+			Default = "legit",
+			Items = { "legit", "rage" },
+			MaxSize = 100,
+			Callback = function(v)
+				if type(v) == "string" then auto_state.mode = v end
+			end,
+		})
+		atog(Escapes, "auto escape carry",           "auto_carry",    "EscapeCarry")
+		atog(Escapes, "break insanity hex",          "auto_insanity", "BreakInsanityHex")
+		atog(Escapes, "escape starling swarm",       "auto_starling", "EscapeStarling")
+		atog(Fx,      "remove screen effects",       "auto_nofx",     "NoScreenFX")
+		atog(Fx,      "remove hex / eye grudge fx", "auto_nohex",    "NoHexFX")
+	end
+	local function rage_complete_prompt(inst)
+		if inst.callback and inst.progressValue then
+			pcall(function() inst.progressValue:set(inst.goal or 4) end)
+			pcall(inst.callback)
+			pcall(function() inst:Destroy() end)
+			return
+		end
+		if inst.inputBegan then
+			pcall(function()
+				inst.progress = 5
+				if inst.progressValue then inst.progressValue:set(5) end
+				inst.hasEscaped = true
+				inst.hasFinished = true
+				inst.inputBegan(5, true)
+			end)
+			pcall(function() inst:Destroy() end)
+		end
+	end
+	local function alive(inst)
+		if type(inst) ~= "table" then return false end
+		if inst.hasEscaped or inst.hasFinished or inst.completed then return false end
+		if type(inst.progressValue) == "table" and type(inst.progressValue.get) == "function" then
+			local ok, p = pcall(function() return inst.progressValue:get() end)
+			if ok and type(p) == "number" and p >= (inst.goal or 4) then return false end
+		end
+		return true
+	end
+	local function overlapping(a, b)
+		if not (a and b and a.AbsolutePosition and b.AbsolutePosition) then return false end
+		local ax, ay = a.AbsolutePosition.X, a.AbsolutePosition.Y
+		local aw, ah = a.AbsoluteSize.X, a.AbsoluteSize.Y
+		local bx, by = b.AbsolutePosition.X, b.AbsolutePosition.Y
+		local bw, bh = b.AbsoluteSize.X, b.AbsoluteSize.Y
+		return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
+	end
+	local function legit_complete_prompt(inst)
+		task.spawn(function()
+			local safety = 0
+			local is_skill_check = type(inst.cursorRef) == "table"
+			                       and type(inst.targetRef) == "table"
+			                       and type(inst.cursorRef.get) == "function"
+			                       and type(inst.targetRef.get) == "function"
+			local last_hit = 0
+			while safety < 2000 and alive(inst) do
+				safety = safety + 1
+				if is_skill_check then
+					local ok, cursor = pcall(function() return inst.cursorRef:get() end)
+					local ok2, target = pcall(function() return inst.targetRef:get() end)
+					if ok and ok2 and cursor and target then
+						if overlapping(cursor, target) and (os.clock() - last_hit) > 0.18 then
+							pcall(function() inst:onInputBegan() end)
+							last_hit = os.clock()
+						end
+					end
+					task.wait()
+				else
+					if type(inst.onInputBegan) == "function" then
+						pcall(function() inst:onInputBegan() end)
+					elseif inst.inputBegan then
+						local step = (type(inst.progressIncrease) == "number" and inst.progressIncrease) or 0.5
+						local p = math.clamp((inst.progress or 0) + step, 0, 5)
+						inst.progress = p
+						if inst.progressValue then pcall(function() inst.progressValue:set(p) end) end
+						local ok, done = pcall(inst.inputBegan, p, false)
+						if ok and done == true then
+							inst.hasEscaped = true
+							return
+						end
+					else
+						return
+					end
+					task.wait(0.09 + math.random() * 0.1)
+				end
+			end
+		end)
+	end
+	local function auto_complete_prompt(inst)
+		if type(inst) ~= "table" then return end
+		if auto_state.mode == "legit" then legit_complete_prompt(inst) else rage_complete_prompt(inst) end
+	end
+	local function rage_complete_clash(inst)
+		task.spawn(function()
+			for _ = 1, 400 do
+				if inst.hasEscaped then return end
+				if inst.clashActivated and type(inst.clashActivated.get) == "function" and inst.clashActivated:get() then
+					break
+				end
+				task.wait(0.05)
+			end
+			for _ = 1, 20 do
+				if inst.hasEscaped then return end
+				pcall(function() inst:onInputBegan() end)
+				if (inst.progress or 0) >= 5 then break end
+				task.wait(0.03)
+			end
+			pcall(function()
+				inst.progress = 5
+				if inst.progressValue then inst.progressValue:set(5) end
+				inst.hasEscaped = true
+				if inst.inputBegan then inst.inputBegan(5, true) end
+			end)
+		end)
+	end
+	local function legit_complete_clash(inst)
+		task.spawn(function()
+			for _ = 1, 600 do
+				if inst.hasEscaped then return end
+				if inst.clashActivated and type(inst.clashActivated.get) == "function" and inst.clashActivated:get() then
+					break
+				end
+				task.wait(0.05)
+			end
+			local goal, cur = 5, 0
+			while cur < goal do
+				if inst.hasEscaped then return end
+				cur = cur + 1
+				if inst.progressValue then pcall(function() inst.progressValue:set(cur) end) end
+				inst.progress = cur
+				if type(inst.onInputBegan) == "function" then pcall(function() inst:onInputBegan() end) end
+				task.wait(0.22 + math.random() * 0.14)
+			end
+			inst.hasEscaped = true
+			if inst.inputBegan then pcall(inst.inputBegan, goal, true) end
+		end)
+	end
+	local function auto_complete_clash(inst)
+		if type(inst) ~= "table" then return end
+		if auto_state.mode == "legit" then legit_complete_clash(inst) else rage_complete_clash(inst) end
+	end
+	local prompt_targets = {
+		{ tail = "ScreenUtils.EscapeSiphonPrompt", flag = "HeadSiphon",    completer = auto_complete_prompt },
+		{ tail = "ScreenUtils.FastActionPrompt",   flag = "HeadSiphon",    completer = auto_complete_prompt },
+		{ tail = "ScreenUtils.CircleActionPrompt", flag = "HeadSiphon",    completer = auto_complete_prompt },
+		{ tail = "ScreenUtils.HoldActionPrompt",   flag = "HeadSiphon",    completer = auto_complete_prompt },
+		{ tail = "BodyJump.SoulClashPrompt",       flag = "BodyJumpClash", completer = auto_complete_clash },
+	}
+	local function sweep_prompts()
+		local pending, any_pending = {}, false
+		for _, t in ipairs(prompt_targets) do
+			if not t.done then pending[t.tail] = t; any_pending = true end
+		end
+		if not any_pending then return true end
+		local gc = r_gg(true)
+		local new_by_tail = {}
+		for _, fn in ipairs(gc) do
+			if type(fn) == "function" then
+				local ok_n, n = pcall(r_di, fn, "n")
+				if ok_n and n == "new" then
+					local ok_s, s = pcall(r_di, fn, "s")
+					if ok_s and type(s) == "string" then
+						for tail in pairs(pending) do
+							if not new_by_tail[tail] and s:sub(-#tail) == tail then
+								new_by_tail[tail] = fn
+							end
+						end
+					end
+				end
+			end
+		end
+		local class_by_tail = {}
+		for _, tbl in ipairs(gc) do
+			if type(tbl) == "table" then
+				local tn = rawget(tbl, "new")
+				if type(tn) == "function" then
+					for tail, fn in pairs(new_by_tail) do
+						if tn == fn then class_by_tail[tail] = tbl end
+					end
+				end
+			end
+		end
+		for tail, class in pairs(class_by_tail) do
+			local t = pending[tail]
+			if t and not t.done then
+				local real_new = class.new
+				local flag, completer = t.flag, t.completer
+				local is_siphon = tail:find("EscapeSiphonPrompt", 1, true) ~= nil
+				class.new = function(...)
+					local inst = real_new(...)
+					if type(inst) ~= "table" then return inst end
+					local use_flag = flag
+					if is_siphon then
+						for _, a in ipairs({ ... }) do
+							if type(a) == "table" then
+								for _, s in pairs(a) do
+									if type(s) == "string" and s:find("Fight") then
+										use_flag = "FightBack"
+										break
+									end
+								end
+							end
+							if use_flag == "FightBack" then break end
+						end
+					end
+					if auto_state[use_flag] then task.defer(completer, inst) end
+					return inst
+				end
+				restore[#restore + 1] = function() class.new = real_new end
+				t.done = true
+			end
+		end
+		for _, t in ipairs(prompt_targets) do
+			if not t.done then return false end
+		end
+		return true
+	end
+	task.spawn(function()
+		for _ = 1, 4 do
+			if sweep_prompts() then return end
+			task.wait(8)
+		end
+	end)
+	local fx_modules = {
+		"SleepEffect", "UpgradedVenom", "WolfVenom",
+		"SicknessScreenEffect", "PlantScreenEffect",
+		"VineOverFace", "ChainOverFace", "BloodThirst",
+		"DesiccateEffect", "StoneEffect",
+		"BarEffect", "Eyelids", "MagicExhaustion",
+		"RestingEffect", "ExhaustionEffect",
+	}
+	local stubbed = {}
+	local function stub_fx(mod)
+		if not mod or stubbed[mod] then return end
+		if type(mod) ~= "table" or type(rawget(mod, "new")) ~= "function" then return end
+		local real_new = mod.new
+		local dummy_mt = {
+			__index = function() return function() end end,
+			__newindex = function() end,
+		}
+		rawset(mod, "new", function(...)
+			if not auto_state.NoScreenFX then return real_new(...) end
+			return setmetatable({ Destroy = function() end }, dummy_mt)
+		end)
+		stubbed[mod] = true
+		restore[#restore + 1] = function() rawset(mod, "new", real_new) end
+	end
+	task.spawn(function()
+		local su = rs:FindFirstChild("ModuleScripts")
+		su = su and su:FindFirstChild("FusionComponents")
+		su = su and su:FindFirstChild("ScreenUtils")
+		if not su then return end
+		for _, name in ipairs(fx_modules) do
+			local m = su:FindFirstChild(name)
+			if m then
+				local ok, loaded = pcall(require, m)
+				if ok and type(loaded) == "table" then stub_fx(loaded) end
+			end
+		end
+	end)
+	task.spawn(function()
+		local fs = rs:FindFirstChild("Bindables") and rs.Bindables:FindFirstChild("FusionStates")
+		if not fs then return end
+		local sleep, stop_sleep = fs:FindFirstChild("PlayerSleepingEffect"), fs:FindFirstChild("StopSleepEffect")
+		if sleep and stop_sleep then
+			conns[#conns + 1] = sleep.Event:Connect(function()
+				if auto_state.NoScreenFX then
+					task.defer(function() pcall(function() stop_sleep:Fire() end) end)
+				end
+			end)
+		end
+		local inst_t = fs:FindFirstChild("InstantScreenTransition")
+		if inst_t then
+			conns[#conns + 1] = inst_t.Event:Connect(function(show)
+				if auto_state.NoScreenFX and show then
+					task.defer(function() pcall(function() inst_t:Fire(false) end) end)
+				end
+			end)
+		end
+	end)
+	task.spawn(function()
+		local pem_mod
+		for _ = 1, 50 do
+			local ok, m = pcall(function() return require(rs.ModuleScripts.Effects.PostProcessingEffectsManager) end)
+			if ok and type(m) == "table" then pem_mod = m; break end
+			task.wait(0.2)
+		end
+		if not pem_mod then return end
+		for _, k in ipairs({ "sunBurn", "snapNeck", "sleep", "venomFlash" }) do
+			local real = rawget(pem_mod, k)
+			if type(real) == "function" then
+				rawset(pem_mod, k, function(...)
+					if auto_state.NoScreenFX then return end
+					return real(...)
+				end)
+				restore[#restore + 1] = function() rawset(pem_mod, k, real) end
+			end
+		end
+	end)
+	task.spawn(function()
+		local ah = lp.PlayerScripts:WaitForChild("ModuleScripts"):WaitForChild("AbilityHandler")
+		local hex_mod_names = { "InsanityHex", "DisorientationHex", "EyeGouge", "MuseVision" }
+		for _, name in ipairs(hex_mod_names) do
+			local m = ah:FindFirstChild(name)
+			if m then
+				local ok, loaded = pcall(require, m)
+				if ok and type(loaded) == "table" then
+					local function wrap(fn_name)
+						local real = rawget(loaded, fn_name)
+						if type(real) == "function" then
+							rawset(loaded, fn_name, function(...)
+								if auto_state.NoHexFX then return end
+								return real(...)
+							end)
+							restore[#restore + 1] = function() rawset(loaded, fn_name, real) end
+						end
+					end
+					for _, k in ipairs({ "new", "start", "begin", "victim", "activated", "init" }) do
+						wrap(k)
+					end
+				end
+			end
+		end
+		local nuke_conn
+		nuke_conn = rsvc.Heartbeat:Connect(function()
+			if not auto_state.NoHexFX then return end
+			local lighting = game:GetService("Lighting")
+			for _, d in ipairs(lighting:GetChildren()) do
+				if d:IsA("BlurEffect") and (d.Name:find("Insanity") or d.Name:find("Hex") or d.Name:find("Disorientation") or d.Name:find("EyeGouge")) then
+					pcall(function() d.Enabled = false end)
+				end
+			end
+			local cam_fx = workspace.CurrentCamera
+			if cam_fx then
+				for _, d in ipairs(cam_fx:GetChildren()) do
+					if (d:IsA("BlurEffect") or d:IsA("ColorCorrectionEffect")) and (d.Name:find("Insanity") or d.Name:find("Hex") or d.Name:find("Disorientation") or d.Name:find("EyeGouge") or d.Name:find("MuseVision")) then
+						pcall(function() d.Enabled = false end)
+					end
+				end
+			end
+			local char = lp.Character
+			if char then
+				for _, d in ipairs(char:GetDescendants()) do
+					if d:IsA("SurfaceGui") and (d.Name:find("Hex") or d.Name == "InsanityHexImage" or d.Name:find("Disorientation") or d.Name:find("EyeGouge")) then
+						pcall(function() d.Enabled = false end)
+					end
+				end
+			end
+		end)
+		conns[#conns + 1] = nuke_conn
+	end)
+	local escape_carry    = remote("Remotes/CarryService/EscapedCarry")
+	local carry_state_chg = remote("Remotes/CarryService/CarryStateChanged")
+	local is_being_carried = remote("Remotes/CarryService/IsBeingCarried")
+	local break_insanity  = remote("Remotes/AbilityService/ToServer/BreakOutOfInsanityHex")
+	local escape_starling = remote("Remotes/AbilityService/ToServer/EscapeStarlingSwarm")
+	local exit_pendant    = remote("Remotes/AbilityService/ToServer/ExitPendantTrapHallway")
+	if is_being_carried and escape_carry then
+		conns[#conns + 1] = is_being_carried.OnClientEvent:Connect(function()
+			if not auto_state.EscapeCarry then return end
+			task.spawn(function()
+				for _ = 1, 20 do
+					pcall(function() escape_carry:FireServer() end)
+					task.wait(0.1)
+				end
+			end)
+		end)
+	end
+	if carry_state_chg and escape_carry then
+		conns[#conns + 1] = carry_state_chg.OnClientEvent:Connect(function()
+			if not auto_state.EscapeCarry then return end
+			pcall(function() escape_carry:FireServer() end)
+		end)
+	end
+	local escape_last = 0
+	conns[#conns + 1] = rsvc.Heartbeat:Connect(function()
+		local t = os.clock()
+		if t - escape_last < 0.35 then return end
+		escape_last = t
+		if auto_state.EscapeCarry      and escape_carry    then pcall(function() escape_carry:FireServer() end) end
+		if auto_state.BreakInsanityHex and break_insanity  then pcall(function() break_insanity:FireServer() end) end
+		if auto_state.EscapeStarling   and escape_starling then pcall(function() escape_starling:FireServer() end) end
+		if auto_state.ExitPendantTrap  and exit_pendant    then pcall(function() exit_pendant:FireServer() end) end
+	end)
+	auto_unload = function()
+		for k in pairs(auto_state) do
+			if type(auto_state[k]) == "boolean" then auto_state[k] = false end
+		end
+		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+		for _, fn in ipairs(restore) do pcall(fn) end
+	end
+end
+local recolor = {
+	IncendiaEnabled = false, IncendiaColor = Color3.fromRGB(120, 60, 255),
+	CircleEnabled   = false, CircleColor   = Color3.fromRGB(120, 60, 255),
+	SiphonEnabled   = false, SiphonColor   = Color3.fromRGB(120, 60, 255),
+	DrawFireEnabled = false, DrawFireColor = Color3.fromRGB(120, 60, 255),
+	CleanseEnabled  = false, CleanseColor  = Color3.fromRGB(120, 60, 255),
+}
+gg.__coverhub_recolor = recolor
+local incendia_templates = {
+	"Incendia", "IncendiaParticle", "IncendiaHit", "CustomIncendiaHit",
+	"FireBall", "CustomFireBall", "FireParticleRig", "IncendiaSpear",
+}
+local circle_templates = {
+	"PhasmatosMotusIncendiamosParticles", "PhasmatosMotusIncendiamosFire",
+	"PhasmatosIncendiaNew", "FireCircle", "MotusShockWave",
+}
+local siphon_templates = {
+	"MagicSiphon", "BarrierSiphon", "SiphonableObject",
+	"SiphonParticle", "SiphonAttachment", "SiphonWallAttachment",
+	"TargetPart", "TargetPartWall", "TargetAuraWall",
+	"HeadSiphon", "HeadSiphonParticle",
+}
+local drawfire_templates = {
+	"PhasmatosIncendia", "PhasmatosIncendiaCaerulus",
+	"DrawFire", "FireLine", "FireTrail",
+}
+local cleanse_templates = {
+	"SuctusIncendia", "FireballProjectile",
+}
+local orig_color = setmetatable({}, { __mode = "k" })
+local function color_snap(inst)
+	if orig_color[inst] ~= nil then return end
+	if inst:IsA("Fire") then
+		orig_color[inst] = { Color = inst.Color, SecondaryColor = inst.SecondaryColor }
+	elseif inst:IsA("Sparkles") then
+		orig_color[inst] = { SparkleColor = inst.SparkleColor }
+	elseif inst:IsA("Smoke") then
+		orig_color[inst] = { Color = inst.Color }
+	elseif inst:IsA("BasePart") then
+		orig_color[inst] = { Color = inst.Color }
+	else
+		orig_color[inst] = inst.Color
+	end
+end
+local function color_paint(inst, color)
+	color_snap(inst)
+	pcall(function()
+		if inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then
+			inst.Color = color
+		elseif inst:IsA("Fire") then
+			inst.Color = color; inst.SecondaryColor = color
+		elseif inst:IsA("Sparkles") then
+			inst.SparkleColor = color
+		elseif inst:IsA("Smoke") then
+			inst.Color = color
+		elseif inst:IsA("BasePart") then
+			if inst.Material == Enum.Material.Neon then inst.Color = color end
+		else
+			inst.Color = ColorSequence.new(color)
+		end
+	end)
+end
+local function color_restore(inst)
+	local o = orig_color[inst]
+	if o == nil then return end
+	pcall(function()
+		if type(o) == "table" then
+			for k, v in pairs(o) do inst[k] = v end
+		else
+			inst.Color = o
+		end
+	end)
+	orig_color[inst] = nil
+end
+local function is_colorable(inst)
+	if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") then return true end
+	if inst:IsA("PointLight") or inst:IsA("SpotLight") or inst:IsA("SurfaceLight") then return true end
+	if inst:IsA("Fire") or inst:IsA("Sparkles") or inst:IsA("Smoke") then return true end
+	if inst:IsA("BasePart") and inst.Material == Enum.Material.Neon then return true end
+	return false
+end
+local function paint_template_tree(root, on, color)
+	if not root then return end
+	for _, d in ipairs(root:GetDescendants()) do
+		if is_colorable(d) then
+			if on then color_paint(d, color) else color_restore(d) end
+		end
+	end
+	if is_colorable(root) then
+		if on then color_paint(root, color) else color_restore(root) end
+	end
+end
+local function paint_all_templates(names, on, color)
+	local assets = rs:FindFirstChild("Assets")
+	if not assets then return end
+	local wanted = {}
+	for _, n in ipairs(names) do wanted[n] = true end
+	for _, d in ipairs(assets:GetDescendants()) do
+		if wanted[d.Name] then paint_template_tree(d, on, color) end
+	end
+end
+local function apply_incendia_recolor()
+	paint_all_templates(incendia_templates, recolor.IncendiaEnabled, recolor.IncendiaColor)
+	pcall(function()
+		if recolor.IncendiaEnabled then
+			local seq = ColorSequence.new(recolor.IncendiaColor)
+			lp:SetAttribute("CustomColor", seq)
+			if lp.Character then lp.Character:SetAttribute("CustomColor", seq) end
+		else
+			lp:SetAttribute("CustomColor", nil)
+			if lp.Character then lp.Character:SetAttribute("CustomColor", nil) end
+		end
+	end)
+end
+local function apply_circle_recolor()
+	paint_all_templates(circle_templates, recolor.CircleEnabled, recolor.CircleColor)
+end
+local function apply_siphon_recolor()
+	paint_all_templates(siphon_templates, recolor.SiphonEnabled, recolor.SiphonColor)
+end
+local function apply_drawfire_recolor()
+	paint_all_templates(drawfire_templates, recolor.DrawFireEnabled, recolor.DrawFireColor)
+end
+local function apply_cleanse_recolor()
+	paint_all_templates(cleanse_templates, recolor.CleanseEnabled, recolor.CleanseColor)
+end
+local recolor_slots = {
+	{ enabled = "IncendiaEnabled", color = "IncendiaColor", names = incendia_templates },
+	{ enabled = "CircleEnabled",   color = "CircleColor",   names = circle_templates },
+	{ enabled = "SiphonEnabled",   color = "SiphonColor",   names = siphon_templates },
+	{ enabled = "DrawFireEnabled", color = "DrawFireColor", names = drawfire_templates },
+	{ enabled = "CleanseEnabled",  color = "CleanseColor",  names = cleanse_templates },
+}
+local function any_recolor_on()
+	return recolor.IncendiaEnabled or recolor.CircleEnabled
+	    or recolor.SiphonEnabled or recolor.DrawFireEnabled
+	    or recolor.CleanseEnabled
+end
+local recolor_conn = workspace.DescendantAdded:Connect(function(d)
+	if not any_recolor_on() then return end
+	if not is_colorable(d) then return end
+	task.defer(function()
+		local a = d
+		while a and a ~= workspace do
+			local nm = a.Name
+			for _, slot in ipairs(recolor_slots) do
+				if recolor[slot.enabled] then
+					for _, tag in ipairs(slot.names) do
+						if nm == tag then
+							color_paint(d, recolor[slot.color])
+							return
+						end
+					end
+				end
+			end
+			a = a.Parent
+		end
+	end)
+end)
+local recolor_spawn_conn = lp.CharacterAdded:Connect(function()
+	task.wait(1)
+	if recolor.IncendiaEnabled then apply_incendia_recolor() end
+end)
+do
+	local Sec = RecolorPage:Section({ Name = "Recolors", Icon = "131145598162617", Side = 1 })
+	Sec:Toggle({
+		Name = "incendia",
+		Flag = "recolor_incendia",
+		Default = false,
+		Callback = function(v) recolor.IncendiaEnabled = v; apply_incendia_recolor() end,
+	}):Colorpicker({
+		Name = "recolor_incendia_color",
+		Flag = "recolor_incendia_color",
+		Default = Color3.fromRGB(120, 60, 255),
+		Callback = function(v) recolor.IncendiaColor = v; if recolor.IncendiaEnabled then apply_incendia_recolor() end end,
+	})
+	Sec:Toggle({
+		Name = "circle",
+		Flag = "recolor_circle",
+		Default = false,
+		Callback = function(v) recolor.CircleEnabled = v; apply_circle_recolor() end,
+	}):Colorpicker({
+		Name = "recolor_circle_color",
+		Flag = "recolor_circle_color",
+		Default = Color3.fromRGB(120, 60, 255),
+		Callback = function(v) recolor.CircleColor = v; if recolor.CircleEnabled then apply_circle_recolor() end end,
+	})
+	Sec:Toggle({
+		Name = "draw fire",
+		Flag = "recolor_drawfire",
+		Default = false,
+		Callback = function(v) recolor.DrawFireEnabled = v; apply_drawfire_recolor() end,
+	}):Colorpicker({
+		Name = "recolor_drawfire_color",
+		Flag = "recolor_drawfire_color",
+		Default = Color3.fromRGB(120, 60, 255),
+		Callback = function(v) recolor.DrawFireColor = v; if recolor.DrawFireEnabled then apply_drawfire_recolor() end end,
+	})
+	Sec:Toggle({
+		Name = "siphon",
+		Flag = "recolor_siphon",
+		Default = false,
+		Callback = function(v) recolor.SiphonEnabled = v; apply_siphon_recolor() end,
+	}):Colorpicker({
+		Name = "recolor_siphon_color",
+		Flag = "recolor_siphon_color",
+		Default = Color3.fromRGB(120, 60, 255),
+		Callback = function(v) recolor.SiphonColor = v; if recolor.SiphonEnabled then apply_siphon_recolor() end end,
+	})
+	Sec:Toggle({
+		Name = "cleanse",
+		Flag = "recolor_cleanse",
+		Default = false,
+		Callback = function(v) recolor.CleanseEnabled = v; apply_cleanse_recolor() end,
+	}):Colorpicker({
+		Name = "recolor_cleanse_color",
+		Flag = "recolor_cleanse_color",
+		Default = Color3.fromRGB(120, 60, 255),
+		Callback = function(v) recolor.CleanseColor = v; if recolor.CleanseEnabled then apply_cleanse_recolor() end end,
+	})
+end
+local cos = {
+	UnlockWheel  = false,
+	RestoreNames = false,
+}
+gg.__coverhub_cos = cos
+local wheel_names = {
+	canDecorate        = true,
+	canDecorateWheel   = true,
+	hasWheelDecoration = true,
+}
+local wheel_hooks = {}
+local function apply_unlock_wheel(on)
+	if on then
+		if #wheel_hooks > 0 then return end
+		for _, fn in ipairs(getgc(true)) do
+			if type(fn) == "function" then
+				local ok, n = pcall(debug.info, fn, "n")
+				if ok and n and wheel_names[n] then
+					local new = newcclosure(function() return true end)
+					local orig = hookfunction(fn, new)
+					wheel_hooks[#wheel_hooks+1] = { fn = fn, orig = orig }
+				end
+			end
+		end
+	else
+		for _, h in ipairs(wheel_hooks) do
+			pcall(function() hookfunction(h.fn, h.orig) end)
+		end
+		wheel_hooks = {}
+	end
+end
+local name_module_paths = {
+	{ "ModuleScripts", "Data", "AbilityData" },
+	{ "ModuleScripts", "Data", "SpeciesData" },
+	{ "ModuleScripts", "Data", "CharacterSpecies" },
+	{ "ModuleScripts", "Data", "NewAbilities" },
+}
+local function resolve_data_module(parts)
+	local n = rs
+	for _, p in ipairs(parts) do
+		n = n and n:FindFirstChild(p)
+		if not n then return nil end
+	end
+	return n
+end
+local name_backups = setmetatable({}, { __mode = "k" })
+local function mutate_name_table(t, on)
+	local function mutate_entry(entry, key, bucket)
+		for _, dk in ipairs({ "displayName", "DisplayName" }) do
+			local cover = rawget(entry, dk)
+			if type(cover) == "string" then
+				local orig = type(rawget(entry, "name")) == "string" and entry.name
+				          or type(rawget(entry, "Name")) == "string" and entry.Name
+				          or (type(key) == "string" and key or nil)
+				if orig and cover ~= orig then
+					bucket[tostring(key).."|"..dk] = { entry = entry, key = dk, cover = cover }
+					entry[dk] = orig
+				end
+			end
+		end
+	end
+	if on then
+		local bucket = name_backups[t] or {}
+		name_backups[t] = bucket
+		for key, entry in pairs(t) do
+			if type(entry) == "table" then
+				mutate_entry(entry, key, bucket)
+				for inner_key, inner_entry in pairs(entry) do
+					if type(inner_entry) == "table" then
+						mutate_entry(inner_entry, inner_key, bucket)
+					end
+				end
+			end
+		end
+	else
+		local bucket = name_backups[t]
+		if bucket then
+			for _, info in pairs(bucket) do
+				pcall(function() info.entry[info.key] = info.cover end)
+			end
+			name_backups[t] = nil
+		end
+	end
+end
+local cover_to_real = nil
+local real_to_cover = nil
+local function rebuild_cover_maps()
+	local c2r, r2c = {}, {}
+	for _, b in pairs(name_backups) do
+		for _, info in pairs(b) do
+			local entry = info.entry
+			local cover = info.cover
+			local real
+			if type(entry) == "table" then
+				if type(rawget(entry, "name")) == "string" then real = entry.name
+				elseif type(rawget(entry, "Name")) == "string" then real = entry.Name end
+			end
+			if cover and real and cover ~= real then
+				c2r[cover] = real
+				r2c[real] = cover
+			end
+		end
+	end
+	for _, pl in ipairs(plrs:GetPlayers()) do
+		local cover = pl:GetAttribute("DisplayName")
+		local real  = pl:GetAttribute("CharacterName")
+		if type(cover) == "string" and type(real) == "string"
+		   and #cover > 0 and #real > 0 and cover ~= real then
+			c2r[cover] = real
+			r2c[real] = cover
+		end
+	end
+	cover_to_real = c2r
+	real_to_cover = r2c
+end
+local relabel_state = setmetatable({}, { __mode = "k" })
+local function relabel(d, map)
+	local txt = d.Text
+	if type(txt) ~= "string" or #txt < 3 then return end
+	if not txt:find("%a") then return end
+	if relabel_state[d] and relabel_state[d].set == txt then return end
+	local new = map[txt]
+	if not new then
+		local trimmed = txt:gsub("^%s+", ""):gsub("%s+$", "")
+		if trimmed ~= txt then new = map[trimmed] end
+	end
+	if not new then
+		local stripped = txt:gsub("<[^>]->", "")
+		if stripped ~= txt and stripped ~= "" then
+			local mapped = map[stripped]
+			if mapped then new = (txt:gsub(stripped:gsub("([^%w])", "%%%1"), mapped, 1)) end
+		end
+	end
+	if not new then
+		for cov, real in pairs(map) do
+			if #cov >= 3 and txt:find(cov, 1, true) then
+				local replaced = (txt:gsub(cov:gsub("([^%w])", "%%%1"), real, 1))
+				if replaced ~= txt then new = replaced; break end
+			end
+		end
+	end
+	if new and new ~= txt then
+		pcall(function() d.Text = new end)
+		relabel_state[d] = { set = new }
+	end
+end
+local function sweep_roots()
+	local roots = {}
+	local pg = lp:FindFirstChildOfClass("PlayerGui")
+	if pg then roots[#roots+1] = pg end
+	local tags = workspace:FindFirstChild("PlayerNameTagFolder")
+	if tags then roots[#roots+1] = tags end
+	local ent = workspace:FindFirstChild("Entities")
+	if ent then roots[#roots+1] = ent end
+	local ap = workspace:FindFirstChild("AstralProjection")
+	if ap then roots[#roots+1] = ap end
+	return roots
+end
+local sweep_conns = {}
+local label_prop_conns = setmetatable({}, { __mode = "k" })
+local function text_matches_cover(txt)
+	if type(txt) ~= "string" or not cover_to_real then return false end
+	if cover_to_real[txt] then return true end
+	local trimmed = txt:gsub("^%s+", ""):gsub("%s+$", "")
+	if trimmed ~= txt and cover_to_real[trimmed] then return true end
+	local stripped = txt:gsub("<[^>]->", "")
+	if stripped ~= txt and cover_to_real[stripped] then return true end
+	for cov in pairs(cover_to_real) do
+		if #cov >= 3 and txt:find(cov, 1, true) then return true end
+	end
+	return false
+end
+local function watch_label(d)
+	if not cover_to_real then return end
+	relabel(d, cover_to_real)
+	if label_prop_conns[d] then return end
+	if not text_matches_cover(d.Text) and not relabel_state[d] then return end
+	label_prop_conns[d] = d:GetPropertyChangedSignal("Text"):Connect(function()
+		if cos.RestoreNames and cover_to_real then relabel(d, cover_to_real) end
+	end)
+end
+local function start_text_sweep()
+	rebuild_cover_maps()
+	if cover_to_real then
+		for _, root in ipairs(sweep_roots()) do
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					watch_label(d)
+				end
+			end
+		end
+	end
+	for _, root in ipairs(sweep_roots()) do
+		sweep_conns[#sweep_conns+1] = root.DescendantAdded:Connect(function(d)
+			if not cos.RestoreNames then return end
+			if d:IsA("TextLabel") or d:IsA("TextButton") then
+				task.defer(watch_label, d)
+			end
+		end)
+	end
+	task.spawn(function()
+		while cos.RestoreNames and cover_to_real do
+			task.wait(2)
+			if not (cos.RestoreNames and cover_to_real) then return end
+			rebuild_cover_maps()
+			for _, root in ipairs(sweep_roots()) do
+				for _, d in ipairs(root:GetDescendants()) do
+					if d:IsA("TextLabel") or d:IsA("TextButton") then
+						relabel(d, cover_to_real)
+					end
+				end
+			end
+		end
+	end)
+end
+local function stop_text_sweep()
+	for _, c in ipairs(sweep_conns) do pcall(function() c:Disconnect() end) end
+	sweep_conns = {}
+	for d, c in pairs(label_prop_conns) do
+		pcall(function() c:Disconnect() end)
+		label_prop_conns[d] = nil
+	end
+	if real_to_cover then
+		for _, root in ipairs(sweep_roots()) do
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					relabel(d, real_to_cover)
+				end
+			end
+		end
+	end
+	cover_to_real = nil
+	real_to_cover = nil
+end
+local function sync_one_humanoid(pl, on)
+	local char = pl.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hum then return end
+	local real = (char and char:GetAttribute("CharacterName")) or pl:GetAttribute("CharacterName")
+	if on and real then
+		if hum:GetAttribute("__coverhub_orig_disp") == nil then
+			hum:SetAttribute("__coverhub_orig_disp", hum.DisplayName)
+		end
+		pcall(function() hum.DisplayName = real end)
+	elseif not on then
+		local orig = hum:GetAttribute("__coverhub_orig_disp")
+		if orig then pcall(function() hum.DisplayName = orig end) end
+		hum:SetAttribute("__coverhub_orig_disp", nil)
+	end
+end
+local function sync_humanoid_names(on)
+	for _, pl in ipairs(plrs:GetPlayers()) do sync_one_humanoid(pl, on) end
+end
+local function apply_restore_names(on)
+	for _, parts in ipairs(name_module_paths) do
+		local mod = resolve_data_module(parts)
+		if mod then
+			local ok, tbl = pcall(require, mod)
+			if ok and type(tbl) == "table" then mutate_name_table(tbl, on) end
+		end
+	end
+	sync_humanoid_names(on)
+	if on then start_text_sweep() else stop_text_sweep() end
+end
+local function hook_player_respawn(pl)
+	pl.CharacterAdded:Connect(function()
+		if cos.RestoreNames then
+			task.wait(0.5)
+			sync_one_humanoid(pl, true)
+		end
+	end)
+end
+for _, pl in ipairs(plrs:GetPlayers()) do hook_player_respawn(pl) end
+local cos_player_conn = plrs.PlayerAdded:Connect(hook_player_respawn)
+do
+	local Sec = RecolorPage:Section({ Name = "Cosmetics", Icon = "131145598162617", Side = 2 })
+	Sec:Toggle({
+		Name = "unlock custom wheel",
+		Flag = "cos_unlock_wheel",
+		Default = false,
+		Callback = function(v) cos.UnlockWheel = v; apply_unlock_wheel(v) end,
+	})
+	Sec:Toggle({
+		Name = "restore original names",
+		Flag = "cos_restore_names",
+		Default = false,
+		Callback = function(v) cos.RestoreNames = v; apply_restore_names(v) end,
+	})
+end
+local fps = { enabled = false }
+gg.__coverhub_fps = fps
+local fps_restore = {}
+local function fps_snap(prop_target, key)
+	local saved = {}
+	for _, inst in ipairs(prop_target) do
+		local ok, v = pcall(function() return inst[key] end)
+		if ok then saved[inst] = v end
+	end
+	return saved
+end
+local function fps_strip_lighting(on)
+	local lighting = game:GetService("Lighting")
+	if on then
+		if fps_restore.lighting_fx == nil then
+			fps_restore.lighting_fx = {}
+			for _, d in ipairs(lighting:GetDescendants()) do
+				if d:IsA("BlurEffect") or d:IsA("SunRaysEffect")
+				   or d:IsA("DepthOfFieldEffect") then
+					local ok, en = pcall(function() return d.Enabled end)
+					if ok then
+						fps_restore.lighting_fx[d] = en
+						pcall(function() d.Enabled = false end)
+					end
+				end
+			end
+		end
+		if fps_restore.globalshadows == nil then
+			fps_restore.globalshadows = lighting.GlobalShadows
+			pcall(function() lighting.GlobalShadows = false end)
+		end
+	else
+		if fps_restore.lighting_fx then
+			for d, v in pairs(fps_restore.lighting_fx) do
+				pcall(function() d.Enabled = v end)
+			end
+			fps_restore.lighting_fx = nil
+		end
+		if fps_restore.globalshadows ~= nil then
+			pcall(function() lighting.GlobalShadows = fps_restore.globalshadows end)
+			fps_restore.globalshadows = nil
+		end
+	end
+end
+local function fps_strip_terrain(on)
+	local t = workspace:FindFirstChildOfClass("Terrain")
+	if not t then return end
+	if on then
+		if fps_restore.terrain == nil then
+			fps_restore.terrain = {
+				WaterWaveSize = t.WaterWaveSize,
+				WaterWaveSpeed = t.WaterWaveSpeed,
+				WaterReflectance = t.WaterReflectance,
+				WaterTransparency = t.WaterTransparency,
+			}
+		end
+		pcall(function()
+			t.WaterWaveSize = 0
+			t.WaterWaveSpeed = 0
+			t.WaterReflectance = 0
+			t.WaterTransparency = 1
+		end)
+	elseif fps_restore.terrain then
+		for k, v in pairs(fps_restore.terrain) do
+			pcall(function() t[k] = v end)
+		end
+		fps_restore.terrain = nil
+	end
+end
+local function fps_quality(on)
+	local ok, ugs = pcall(function() return settings():GetService("UserGameSettings") end)
+	if not ok or not ugs then return end
+	if on then
+		if fps_restore.quality == nil then
+			fps_restore.quality = ugs.SavedQualityLevel
+		end
+		pcall(function() ugs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel3 end)
+	elseif fps_restore.quality ~= nil then
+		pcall(function() ugs.SavedQualityLevel = fps_restore.quality end)
+		fps_restore.quality = nil
+	end
+end
+local function fps_apply(on)
+	fps.enabled = on
+	fps_strip_lighting(on)
+	fps_strip_terrain(on)
+	fps_quality(on)
+end
+do
+	local Sec = RecolorPage:Section({ Name = "Performance", Icon = "131145598162617", Side = 2 })
+	Sec:Toggle({
+		Name = "fps booster",
+		Flag = "fps_booster",
+		Default = false,
+		Callback = function(v) fps_apply(v) end,
+	})
+end
+gg.__coverhub_unload = function()
+	if osp_key_conn then osp_key_conn:Disconnect() end
+	if aim_conn then aim_conn:Disconnect() end
+	if osp_conn then osp_conn:Disconnect() end
+	if kbl_conn then kbl_conn:Disconnect() end
+	if indicator_conn then indicator_conn:Disconnect() end
+	if kbl_gui then pcall(function() kbl_gui:Destroy() end) end
+	if indicator_gui then pcall(function() indicator_gui:Destroy() end) end
+	if target_write_conn then target_write_conn:Disconnect() end
+	if recolor_conn then recolor_conn:Disconnect() end
+	if recolor_spawn_conn then recolor_spawn_conn:Disconnect() end
+	if cos_player_conn then cos_player_conn:Disconnect() end
+	for _, slot in ipairs(recolor_slots) do
+		if recolor[slot.enabled] then
+			recolor[slot.enabled] = false
+			paint_all_templates(slot.names, false, recolor[slot.color])
+		end
+	end
+	pcall(function() apply_unlock_wheel(false) end)
+	pcall(function() apply_restore_names(false) end)
+	pcall(function() fps_apply(false) end)
+	for ts, cb in pairs(patched) do pcall(function() ts.Callback = cb end) end
+	ts_mod.new = real_ts_new
+	osp.enabled = false
+    pcall(esp_unload)
+    pcall(auto_unload)
+	gg.__coverhub_unload_signal = true
+	if ac_guard_conn then ac_guard_conn:Disconnect() end
+	gg.__coverhub_osp = nil
+	gg.__coverhub_recolor = nil
+	gg.__coverhub_cos = nil
+	gg.__coverhub_hub = nil
+	gg.__coverhub_unload = nil
+	pcall(function() Library:Unload() end)
+end
+print("[coverhub] rewrite loaded")
